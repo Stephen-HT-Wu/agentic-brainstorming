@@ -497,7 +497,6 @@ def draft_proposal(state: HomeworkState) -> dict:
         f"研究彙整：\n{state['research_brief']}\n\n"
         f"可用來源：\n{sources_block}"
     )
-    raw = None  # draft 改走 _request_proposal
     proposal = _request_proposal(system, user)
     missing = assert_bmc_complete(proposal)
     if missing:
