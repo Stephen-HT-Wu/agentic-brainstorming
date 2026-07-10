@@ -16,15 +16,17 @@
    persona `Send` 同一份子圖
 2. **Agent tool use**：`collect` 真的打 web search（DuckDuckGo；有
    `TAVILY_API_KEY` 則改走 Tavily），提案必須引用回傳的 URL
-3. **embedding 去重**：搜尋結果用 feature-hashing cosine 去重（不花 token）；
+3. **embedding 去重**：搜尋結果用中文 2/3-gram feature-hashing cosine 去重
+   （不花 token；避免把整段連續中文誤當成單一 token）；
    之後 stage 7 再升級成 Chroma
 4. **BMC 結構不變量**：九格缺一不可，程式用 `assert_bmc_complete` 驗證
 5. **自我修正有數字**：每輪記 `embedding_distance` 與 `self_score_delta`，
    用 `judge_third_round()` 回答「第三輪值不值得」
 6. **Baseline 對照**：同一主題一次 LLM 呼叫，用同一套指標（真實引用數、
    BMC 完整度、成本）並排——這是 demo「跟直接問 ChatGPT 差在哪」的資料來源
-7. **事件流**：每個動作 append 一筆到 `outputs/events.jsonl`（之後 stage 10
-   回放器會讀它）
+7. **事件流**：每個 node invocation 有獨立 context，事件只記該次 invocation
+   的 token／成本；巢狀子圖返回後會恢復父節點 context。每個動作 append 一筆到
+   `outputs/events.jsonl`（之後 stage 10 回放器會讀它）
 
 ## 設定檔雙軌
 

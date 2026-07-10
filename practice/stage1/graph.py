@@ -25,6 +25,7 @@ import re
 import sys
 import time
 import warnings
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, List, Literal, Optional, TypedDict
@@ -39,6 +40,7 @@ warnings.filterwarnings("ignore", category=LangChainPendingDeprecationWarning)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from _common import (  # noqa: E402
     cost_of,
+    current_invocation,
     current_node,
     instrument,
     node_times,
@@ -82,7 +84,7 @@ BMC_KEYS = [
 ]
 
 usage_log: list = []
-_event_role = "system"
+_event_role: ContextVar[str] = ContextVar("event_role", default="system")
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +136,7 @@ def call_llm(model: str, system: str, user: str, max_tokens: int = 2500) -> str:
         response = _create(tokens)
         usage_log.append({
             "node": current_node(),
+            "invocation": current_invocation(),
             "model": model,
             "input": response.usage.input_tokens,
             "output": response.usage.output_tokens,
@@ -182,14 +185,14 @@ def emit_event(
     """每個節點寫一筆結構化事件到 outputs/events.jsonl（stage 1 起必寫）。"""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     node = current_node()
-    calls = [e for e in usage_log if e["node"] == node]
-    # 只計「自從上次 emit 後」不好追，改記該節點累計；同一節點多次 emit 時用 delta 近似
+    invocation = current_invocation()
+    calls = [e for e in usage_log if e.get("invocation") == invocation]
     tokens_in = sum(e["input"] for e in calls)
     tokens_out = sum(e["output"] for e in calls)
     cost = sum(cost_of(e) for e in calls)
     record = {
         "ts": datetime.now(timezone.utc).isoformat(),
-        "role": role or _event_role,
+        "role": role or _event_role.get(),
         "action": action,
         "node": node,
         "summary": summary,
@@ -207,7 +210,15 @@ def emit_event(
 # ---------------------------------------------------------------------------
 
 def _tokenize(text: str) -> List[str]:
-    return re.findall(r"[a-z0-9\u4e00-\u9fff]+", text.lower())
+    """英文切詞、中文切 2/3-gram，讓小幅中文改寫仍有共同特徵。"""
+    tokens = re.findall(r"[a-z0-9]+", text.lower())
+    for chunk in re.findall(r"[\u4e00-\u9fff]+", text):
+        if len(chunk) == 1:
+            tokens.append(chunk)
+            continue
+        for n in (2, 3):
+            tokens.extend(chunk[i : i + n] for i in range(len(chunk) - n + 1))
+    return tokens
 
 
 def embed_text(text: str, dim: int = EMBED_DIM) -> List[float]:
@@ -252,6 +263,14 @@ def web_search(query: str, max_results: int = 5) -> List[dict]:
     if tavily_key:
         return _search_tavily(query, tavily_key, max_results)
     return _search_ddg(query, max_results)
+
+
+def is_usable_search_result(item: dict) -> bool:
+    """排除空連結及搜尋引擎廣告跳轉頁，避免它們進入研究與引用池。"""
+    url = (item.get("url") or "").strip().lower()
+    if not url.startswith(("http://", "https://")):
+        return False
+    return not any(marker in url for marker in ("bing.com/aclick", "googleadservices.com"))
 
 
 def _search_ddg(query: str, max_results: int) -> List[dict]:
@@ -312,14 +331,15 @@ def proposal_text_for_embed(proposal: dict) -> str:
 
 
 def assert_bmc_complete(proposal: dict) -> List[str]:
-    """回傳缺漏的 BMC 欄位；空 list = 九格齊全。"""
+    """回傳 BMC 結構問題；空 list = 恰好九格且每格為非空字串。"""
     bmc = proposal.get("bmc") or {}
-    missing = []
+    issues = []
     for key in BMC_KEYS:
         val = bmc.get(key)
-        if val is None or (isinstance(val, str) and not val.strip()):
-            missing.append(key)
-    return missing
+        if not isinstance(val, str) or not val.strip():
+            issues.append(f"缺漏或無效:{key}")
+    issues.extend(f"額外欄位:{key}" for key in bmc if key not in BMC_KEYS)
+    return issues
 
 
 def count_real_citations(proposal: dict, research_items: List[dict]) -> int:
@@ -338,7 +358,11 @@ def metrics_of(proposal: dict, research_items: List[dict], cost: float) -> dict:
     return {
         "bmc_complete": len(missing) == 0,
         "bmc_missing": missing,
-        "bmc_filled": 9 - len(missing),
+        "bmc_filled": sum(
+            isinstance((proposal.get("bmc") or {}).get(k), str)
+            and bool((proposal.get("bmc") or {}).get(k).strip())
+            for k in BMC_KEYS
+        ),
         "real_citations": count_real_citations(proposal, research_items),
         "source_count": len(proposal.get("sources") or []),
         "self_score": proposal.get("self_score"),
@@ -369,22 +393,22 @@ def _persona_label(persona: dict) -> str:
 
 def collect(state: HomeworkState) -> dict:
     """依 persona 關注面向組查詢，呼叫 web search（agent tool use）。"""
-    global _event_role
     persona = state["persona"]
-    _event_role = _persona_label(persona)
+    _event_role.set(_persona_label(persona))
     topic = state["topic"]
     focus = persona.get("focus") or ["市場現況"]
     queries = [
         f"{topic} {focus[0]}",
-        f"{topic} 短影音 互動率 策略",
-        f"新聞短影音 競品 留存 案例",
+        f"{topic} 市場趨勢 競品 案例",
+        f"{topic} {focus[1] if len(focus) > 1 else '用戶需求 商業模式'}",
     ]
     raw: List[dict] = []
     for q in queries:
         try:
             hits = web_search(q, max_results=4)
-            raw.extend(hits)
-            print(f"  [collect] query={q!r} → {len(hits)} 筆")
+            usable = [hit for hit in hits if is_usable_search_result(hit)]
+            raw.extend(usable)
+            print(f"  [collect] query={q!r} → {len(usable)}/{len(hits)} 筆可用")
         except Exception as exc:  # noqa: BLE001 — 搜尋失敗不中斷整場
             print(f"  [collect] query={q!r} 失敗：{exc}")
     emit_event(
@@ -498,14 +522,16 @@ def draft_proposal(state: HomeworkState) -> dict:
         f"可用來源：\n{sources_block}"
     )
     proposal = _request_proposal(system, user)
-    missing = assert_bmc_complete(proposal)
-    if missing:
+    issues = assert_bmc_complete(proposal)
+    if issues:
         # 一次補齊缺格，維持結構不變量
         proposal = _request_proposal(
             "你只負責補齊 BMC 缺漏欄位。輸出完整提案 JSON（含原有內容）。"
             + _PROPOSAL_SCHEMA_HINT,
-            f"缺漏：{missing}\n\n原提案：\n{json.dumps(proposal, ensure_ascii=False)}",
+            f"結構問題：{issues}\n\n原提案：\n{json.dumps(proposal, ensure_ascii=False)}",
         )
+    if issues := assert_bmc_complete(proposal):
+        raise ValueError(f"BMC 結構不變量失敗：{issues}")
     emit_event(
         "draft_proposal",
         f"初稿《{proposal.get('title', '')}》self_score={proposal.get('self_score')}",
@@ -539,11 +565,17 @@ def refine(state: HomeworkState) -> dict:
         f"上一版提案 JSON：\n{json.dumps(prev, ensure_ascii=False)}"
     )
     nxt = _request_proposal(system, user)
-    if assert_bmc_complete(nxt):
-        # 不變量：缺格就保留上一版 bmc 對應格
-        bmc = dict(prev.get("bmc") or {})
-        bmc.update({k: v for k, v in (nxt.get("bmc") or {}).items() if v})
-        nxt["bmc"] = bmc
+    # 只接受協議內的九格；缺格或無效值沿用上一版。
+    candidate_bmc = nxt.get("bmc") or {}
+    prev_bmc = prev.get("bmc") or {}
+    nxt["bmc"] = {
+        key: candidate_bmc.get(key)
+        if isinstance(candidate_bmc.get(key), str) and candidate_bmc[key].strip()
+        else prev_bmc.get(key, "")
+        for key in BMC_KEYS
+    }
+    if issues := assert_bmc_complete(nxt):
+        raise ValueError(f"BMC 結構不變量失敗：{issues}")
 
     dist = embedding_distance(proposal_text_for_embed(prev), proposal_text_for_embed(nxt))
     score_delta = float(nxt.get("self_score") or 0) - float(prev.get("self_score") or 0)
@@ -620,25 +652,28 @@ class MeetingState(TypedDict):
 
 def run_homework(state: MeetingState) -> dict:
     """父節點：invoke 做功課子圖，再把結果寫回會議 state。"""
-    global _event_role
-    _event_role = _persona_label(state["persona"])
+    role_token = _event_role.set(_persona_label(state["persona"]))
     emit_event("homework_start", f"開始做功課子圖，主題={state['topic']!r}")
-    result = homework_graph.invoke({
-        "topic": state["topic"],
-        "persona": state["persona"],
-        "company": state["company"],
-        "raw_results": [],
-        "research_items": [],
-        "research_brief": "",
-        "proposal": {},
-        "proposal_versions": [],
-        "refine_deltas": [],
-        "refine_round": 0,
-    })
+    try:
+        result = homework_graph.invoke({
+            "topic": state["topic"],
+            "persona": state["persona"],
+            "company": state["company"],
+            "raw_results": [],
+            "research_items": [],
+            "research_brief": "",
+            "proposal": {},
+            "proposal_versions": [],
+            "refine_deltas": [],
+            "refine_round": 0,
+        })
+    finally:
+        _event_role.reset(role_token)
     emit_event(
         "homework_done",
         f"子圖完成，提案《{(result.get('proposal') or {}).get('title', '')}》，"
         f"修正 {len(result.get('refine_deltas') or [])} 輪",
+        role=_persona_label(state["persona"]),
     )
     return {
         "research_items": result.get("research_items") or [],
@@ -666,8 +701,7 @@ meeting_graph = build_parent_graph()
 
 def run_baseline(topic: str, company: str) -> dict:
     """對照組：一次單純 LLM 呼叫，模擬『直接問 ChatGPT/Claude』。"""
-    global _event_role
-    _event_role = "baseline"
+    role_token = _event_role.set("baseline")
     set_current_node("baseline")
     t0 = time.perf_counter()
     system = (
@@ -676,11 +710,14 @@ def run_baseline(topic: str, company: str) -> dict:
         + _PROPOSAL_SCHEMA_HINT
     )
     user = f"主題：{topic}\n\n公司背景：\n{company}\n\n請直接給提案 JSON。"
-    proposal = _request_proposal(system, user)
+    try:
+        proposal = _request_proposal(system, user)
+    finally:
+        _event_role.reset(role_token)
     node_times["baseline"] = node_times.get("baseline", 0.0) + (
         time.perf_counter() - t0
     )
-    emit_event("baseline", f"直接問 LLM《{proposal.get('title', '')}》")
+    emit_event("baseline", f"直接問 LLM《{proposal.get('title', '')}》", role="baseline")
     return proposal
 
 
