@@ -1,0 +1,23 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Secrets
+.env
+
+# 真實設定（只 commit *.example.*，真實檔含公司/人設隱私）
+personas.yaml
+users.yaml
+company.md
+
+# 記憶與 checkpointer（含會議內容）
+chroma_db/
+*.sqlite
+*.sqlite3
+
+# 產出（逐字稿、事件流、報告皆含會議內容）
+outputs/
+
+# 唯一允許 commit 的產出：demo 用虛構樣本
+!demo/sample-run/
