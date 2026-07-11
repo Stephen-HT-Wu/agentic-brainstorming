@@ -19,5 +19,10 @@ chroma_db/
 # 產出（逐字稿、事件流、報告皆含會議內容）
 outputs/
 
-# 唯一允許 commit 的產出：demo 用虛構樣本
+# stage10 產生 demo 樣本用的隔離工作區（跟 outputs/ 同一種東西，只是
+# 路徑不同，不受用者真實的 practice/outputs/ 影響）
+practice/stage10/demo_workspace/
+
+# 唯一允許 commit 的產出：demo 用虛構樣本（來自 personas.example.yaml 等
+# 公開範例設定跑出來的，內容全虛構，安全公開）
 !demo/sample-run/
