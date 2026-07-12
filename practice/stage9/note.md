@@ -107,3 +107,43 @@ eCPM試驗」，這是真實測試反饋驅動範疇收斂的具體案例。
 - [x] 報告完整含人類問答與兩輪訪談記錄（`report_complete` 逐段驗證通過，
       不是只檢查檔案存在；肉眼確認過 258 行報告的三個 top-K 章節都有
       完整的兩輪訪談逐字稿）
+
+## 後續重構（2026-07-12）：從「競爭選拔」改成「共創收斂」
+
+使用者用過即時面板後提出根本性的流程修改：「與會者是各個領域的人才，
+能提供不同的角度。我們不是在比賽，而是要他們在聽取彼此意見後，共創出
+一個好的產品的 prototype 然後給使用者檢驗。」原本「全員互評打分→
+選 Top-K→各自做原型」的競爭選拔框架整個換掉：
+
+- **移除**：`run_collective_scoring`／`score_proposal`／
+  `compute_score_aggregates()`／`select_top_k()`／`TOP_K`——整個
+  「交叉評分選贏家」機制刪除，不留死碼
+- **新增 `co_create_turn` 自我迴圈節點**（父圖層級的條件邊迴圈，這個
+  codebase 首個單節點自環，真實跑測驗證逐輪 checkpoint／emit_event
+  正常）：種子草稿取自 facilitator_log 最後一筆 present（討論實際
+  收斂到的地方，不是固定 personas[0] 的設定檔順序偏見），其餘 3 位
+  依序在同一份共享草稿上各自編輯一輪，每輪都把大師點評餵進 context
+  （不然 run_masters 的輸出沒人讀）
+- **`built_on_persona_ids` 經過驗證，不是距離代理**：每輪編輯聲稱
+  整合了誰的觀點，比對真實 persona id 集合過濾幻覺——刻意不用
+  embedding_distance 門檻判斷「有沒有整合」（距離大只代表改很多，
+  最後一輪整份覆寫成自己的版本反而距離最大、卻是整合失敗）
+- **insight_refs 命名空間問題**：每人的洞見 id 都從 "i1" 編號，多人
+  輪流編輯同一份草稿會撞名——這輪編輯者只能引用自己真實存在的 id，
+  驗證後加 persona id 前綴（"mei:i1"）存進共創草稿
+- **下游子圖零修改**：`prototype_test_graph`／`three_lens_panel_graph`
+  對「幾個提案」沒有結構性假設（fan-out 都是普通 comprehension），
+  只改上層節點餵給它們單一共創提案＋合成的「共創提案小組」persona
+- **對比表指標更換**：「點子多樣性」（多提案彼此差異，選拔框架下才有
+  意義）→「整合的跨領域觀點數」（種子 persona + built_on 聯集，量
+  「有多少不同人真的被整合」）；收斂前的 `diversity_before/after`
+  維持不變——仍是「起點真的夠不同」的合理佐證
+
+**真實跑測驗證**（2026-07-12，--example-config，總成本 $0.02 等級）：
+共創迴圈 3/3 輪逐輪落地成獨立事件，`built_on_persona_ids` 全部非空且
+指向真實成員（第1輪陳阿力整合 joyce+victor、第2輪周若琪整合 victor、
+第3輪王承翰整合 joyce）；三輪的貢獻說明都能對應到大師點評的具體批評
+（例如「回應商業大師對缺乏付費誘因批評」），證明大師意見真的被讀進
+編輯 context；單一原型（共創提案小組）＋4×1 三鏡檢核＋write_wisdom
+34 筆（含新 doc_type：co_created_proposal ×1、co_creation_turn ×3）
+全部正確；main() 新驗收區塊全數通過。
