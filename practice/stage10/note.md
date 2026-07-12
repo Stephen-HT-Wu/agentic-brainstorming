@@ -119,3 +119,41 @@ Chroma 剛啟用）。
 - [x] `demo/sample-run/` 只含虛構範例設定跑出的真實資料，外人不需要
       API key 就能看回放（`.gitignore` 已排除 `chroma_db/`／`outputs/`／
       `practice/stage10/demo_workspace/`，只放行這個目錄）
+
+## 加值：回放事件點擊要看得到完整內容（2026-07-11 補做）
+
+使用者反應「事件回放面板很好，但點每一步只看到 `extra` 原始 JSON 傾印，
+看不出做了什麼功課、形成了什麼意見」。原本 `detailPanel` 就是把
+`e.extra` 整包 `JSON.stringify` 塞進 `<pre>`——資料都在，但沒人想在
+demo 現場讀原始 JSON。
+
+改法：`build_replay.py` 新增 `_attach_details()`，在建置時把 `present`／
+`baseline`／`generate_prototype`／`refine_after_test` 事件跟
+`run_data`（`idea_pool_versions`／`prototypes`／`baseline.proposal`）
+用 persona 姓名對起來，直接把完整提案（BMC 九宮格、真實搜尋來源、
+POV/HMW、自評分數）或原型（landing page 文案、功能、測試後 diff、
+模擬用戶反應）掛進事件的 `detail` 欄位；其餘 action（`collect`／
+`recall_memory`／`give_feedback`／`three_lens_check`／`master_critique`
+等）則在 JS 端依 action 類型分別排版成人看得懂的區塊（列表、Q&A、
+BMC 格子），不再是一坨 JSON。
+
+### 踩到的坑：修這個順便抓到一個真的隱私外洩
+
+串 `run_data.prototypes[].html_path` 時發現：這個欄位存的是產生原型
+當下的**本機絕對路徑**（`/Users/stephen/agentic-brainstorming/practice/
+stage10/demo_workspace/outputs/prototypes/demo-sample-round2-*.html`），
+而這個值會被直接寫進事件的 `extra.html_path`，再被 `build_replay_html`
+整包序列化進公開的 `replay.html`——也就是說，已經 commit 到公開 repo 的
+`demo/sample-run/replay.html`（以及 `demo/sample-run/events.jsonl`
+本身）裡，藏著本機使用者名稱與資料夾結構，之前那次「把
+`prototype-*.html` 路徑用 `sed` 轉成相對路徑」的隱私處理只做在原型
+HTML 檔案本身，漏了 `events.jsonl`／回放器內嵌資料這條路徑。
+
+修正方式：不信任 `run_data` 裡任何欄位自帶的 `html_path`，一律依
+`persona_id` 重新算出跟 `demo/sample-run/` 實際檔名一致的相對路徑
+（`prototype-<id>.html`），兩個地方都要清（`extra.html_path` 本身，
+以及掛進 `detail.prototype` 的完整原型物件裡的 `html_path`）——用單元
+測試鎖住兩處都不能漏（`AttachDetailsTests`）。已重新產生
+`demo/sample-run/replay.html` 並直接對已 commit 的
+`demo/sample-run/events.jsonl` 做同樣的清理，`grep -rl '/Users/'
+demo/sample-run/` 確認全乾淨。

@@ -95,6 +95,72 @@ def compute_comparison(run_data: dict) -> dict:
     }
 
 
+def _persona_name_from_role(role: str) -> str | None:
+    if isinstance(role, str) and role.startswith("persona:"):
+        return role[len("persona:"):]
+    return None
+
+
+def _clean_prototype_html_path(p: dict) -> dict:
+    """run_data.prototypes[].html_path 記的是產生當下的本機絕對路徑
+    （demo_workspace/outputs/prototypes/...）——不能直接信任這個欄位，因為它跟
+    events.jsonl 裡的路徑是同一次跑測產生的，只有事後手動 sed 過的
+    demo/sample-run/ 副本才乾淨。改成依 persona_id 直接算出跟 demo/sample-run/
+    實際檔名（`prototype-<id>.html`）一致的相對路徑，這樣不管 build_replay.py
+    是對著哪一份原始 run 資料跑，輸出永遠不會外洩本機路徑。"""
+    clean = dict(p)
+    persona_id = p.get("persona_id")
+    if persona_id:
+        clean["html_path"] = f"prototype-{persona_id}.html"
+    else:
+        clean["html_path"] = Path(p.get("html_path", "")).name
+    return clean
+
+
+def _sanitize_html_path(path: str, prototype_by_name: dict, persona_name: str | None) -> str:
+    if persona_name and persona_name in prototype_by_name:
+        clean = prototype_by_name[persona_name].get("html_path")
+        if clean:
+            return clean
+    return Path(path).name
+
+
+def _attach_details(events: list, run_data: dict) -> None:
+    """把 present／baseline／原型事件跟 run_data 裡的完整資料串起來，回放器點擊事件
+    時能看到完整提案（BMC 九宮格/真實來源/POV-HMW）跟原型內容，不是只有事件當下記錄的
+    摘要片段——這是使用者要求「點每一步都能看到做了什麼功課、形成的意見是什麼」的關鍵。"""
+    proposal_by_name = {v.get("persona_name"): v for v in (run_data.get("idea_pool_versions") or [])}
+    prototype_by_name = {
+        p.get("persona_name"): _clean_prototype_html_path(p)
+        for p in (run_data.get("prototypes") or [])
+    }
+    baseline_proposal = (run_data.get("baseline") or {}).get("proposal")
+
+    for e in events:
+        action = e.get("action")
+        name = _persona_name_from_role(e.get("role", ""))
+
+        if action == "present" and name in proposal_by_name:
+            v = proposal_by_name[name]
+            e["detail"] = {
+                "kind": "proposal",
+                "note": f"發表當下標題為《{v.get('before_title')}》；以下顯示的是經過同儕互評修正後的最終版本。",
+                "proposal": v.get("proposal_after"),
+            }
+        elif action == "baseline" and baseline_proposal:
+            e["detail"] = {
+                "kind": "proposal",
+                "note": "單次 LLM 呼叫直接生成，未經搜尋、互評或測試。",
+                "proposal": baseline_proposal,
+            }
+        elif action in ("generate_prototype", "refine_after_test") and name in prototype_by_name:
+            e["detail"] = {"kind": "prototype", "prototype": prototype_by_name[name]}
+
+        extra = e.get("extra")
+        if isinstance(extra, dict) and extra.get("html_path"):
+            extra["html_path"] = _sanitize_html_path(extra["html_path"], prototype_by_name, name)
+
+
 ROLE_COLOR_PALETTE = [
     "#5b7cff", "#3ed9c2", "#ffb454", "#ff6b9d", "#9d7bff", "#4ade80",
 ]
@@ -194,9 +260,25 @@ HTML_TEMPLATE = r"""<!doctype html>
   .event-summary { font-size: 0.88rem; color: #c4cbe0; overflow-wrap: break-word; }
   .event-meta { font-size: 0.75rem; color: #6b7590; margin-top: 2px; }
 
-  .detail-panel { margin-top: 16px; background: #0f1526; border-radius: 8px; padding: 16px; min-height: 90px; }
+  .detail-panel { margin-top: 16px; background: #0f1526; border-radius: 8px; padding: 16px; min-height: 90px; max-height: 520px; overflow-y: auto; }
   .detail-panel .role { font-weight: 700; margin-bottom: 6px; }
   .detail-panel pre { white-space: pre-wrap; word-break: break-word; font-family: inherit; margin: 8px 0 0; font-size: 0.85rem; color: #a8b2cc; }
+  .detail-panel .summary-line { color: #c4cbe0; margin-bottom: 4px; }
+  .detail-note { color: #8a93a6; font-size: 0.82rem; font-style: italic; margin: 6px 0; }
+  .detail-proposal-title { font-size: 1.05rem; font-weight: 700; color: #e8ecf4; margin-top: 8px; }
+  .detail-block { margin-top: 14px; }
+  .detail-block-title { font-size: 0.78rem; font-weight: 700; color: #8fb0ff; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px; }
+  .detail-list { margin: 0; padding-left: 18px; }
+  .detail-list li { margin-bottom: 4px; font-size: 0.88rem; color: #c4cbe0; }
+  .kv { display: flex; gap: 8px; font-size: 0.85rem; margin-bottom: 4px; }
+  .kv .k { color: #6b7590; flex-shrink: 0; }
+  .kv .v { color: #c4cbe0; }
+  .bmc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
+  .bmc-cell { background: #131a2c; border-radius: 6px; padding: 8px 10px; }
+  .bmc-key { font-size: 0.75rem; color: #8fb0ff; font-weight: 700; margin-bottom: 3px; }
+  .bmc-val { font-size: 0.82rem; color: #c4cbe0; }
+  .quote { background: #131a2c; border-left: 3px solid #2a3557; border-radius: 4px; padding: 8px 12px; margin-bottom: 8px; font-size: 0.88rem; color: #c4cbe0; }
+  .quote b { color: #8fb0ff; }
 
   footer { text-align: center; padding: 30px; color: #5a6478; font-size: 0.82rem; }
 </style>
@@ -308,6 +390,141 @@ function escapeHtml(s) {
   return d.innerHTML;
 }
 
+function esc(s) { return escapeHtml(s === undefined || s === null ? '' : String(s)); }
+
+function ul(items) {
+  if (!items || !items.length) return '';
+  return '<ul class="detail-list">' + items.map(i => `<li>${esc(typeof i === 'object' ? (i.id ? i.id + '：' : '') + (i.text || JSON.stringify(i)) : i)}</li>`).join('') + '</ul>';
+}
+
+function kv(label, value) {
+  if (value === undefined || value === null || value === '') return '';
+  return `<div class="kv"><span class="k">${esc(label)}</span><span class="v">${esc(value)}</span></div>`;
+}
+
+function block(title, html) {
+  if (!html) return '';
+  return `<div class="detail-block"><div class="detail-block-title">${esc(title)}</div>${html}</div>`;
+}
+
+const BMC_ORDER = ["客群","價值主張","通路","顧客關係","收益流","關鍵資源","關鍵活動","關鍵夥伴","成本結構"];
+
+function renderBmc(bmc) {
+  if (!bmc) return '';
+  let html = '<div class="bmc-grid">';
+  for (const k of BMC_ORDER) {
+    if (bmc[k]) html += `<div class="bmc-cell"><div class="bmc-key">${esc(k)}</div><div class="bmc-val">${esc(bmc[k])}</div></div>`;
+  }
+  html += '</div>';
+  return html;
+}
+
+function renderSources(sources) {
+  if (!sources || !sources.length) return '';
+  return '<ul class="detail-list">' + sources.map(s =>
+    `<li><a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.title || s.url)}</a>${s.how_used ? ' — ' + esc(s.how_used) : ''}</li>`
+  ).join('') + '</ul>';
+}
+
+function renderProposal(p, note) {
+  if (!p) return '';
+  let html = '';
+  if (note) html += `<div class="detail-note">${esc(note)}</div>`;
+  if (p.title) html += `<div class="detail-proposal-title">${esc(p.title)}</div>`;
+  if (p.summary) html += `<p>${esc(p.summary)}</p>`;
+  html += block('POV', p.pov ? `<p>${esc(p.pov)}</p>` : '');
+  html += block('HMW', p.hmw ? `<p>${esc(p.hmw)}</p>` : '');
+  html += block('HMW 回應', p.hmw_response ? `<p>${esc(p.hmw_response)}</p>` : '');
+  html += kv('自評分數', p.self_score !== undefined ? p.self_score + (p.score_reason ? '：' + p.score_reason : '') : '');
+  html += block('修正說明', p.revision_note ? `<p>${esc(p.revision_note)}</p>` : '');
+  html += block('Business Model Canvas', renderBmc(p.bmc));
+  html += block('真實搜尋依據', renderSources(p.sources));
+  html += kv('引用洞見', (p.insight_refs || []).join(', '));
+  html += kv('引用跨場記憶', (p.memory_refs || []).join(', '));
+  return html;
+}
+
+function renderPrototype(proto) {
+  if (!proto) return '';
+  const lp = proto.landing_page || {};
+  let html = '';
+  if (lp.headline) html += `<div class="detail-proposal-title">${esc(lp.headline)}</div>`;
+  if (lp.subheadline) html += `<p>${esc(lp.subheadline)}</p>`;
+  html += block('概念一頁書', lp.concept_one_pager ? `<p>${esc(lp.concept_one_pager)}</p>` : '');
+  html += block('功能', ul((lp.features || []).map(f => `${f.title}：${f.desc}`)));
+  html += block('測試後修改內容', proto.diff_text ? `<pre>${esc(proto.diff_text)}</pre>` : '');
+  if (proto.reactions && proto.reactions.length) {
+    html += block('模擬用戶反應', proto.reactions.map(r => `<div class="quote"><b>${esc(r.user_name)}：</b>${esc(r.reaction)}</div>`).join(''));
+  }
+  html += kv('原型檔案', proto.html_path);
+  return html;
+}
+
+function renderExtraGeneric(action, extra) {
+  if (!extra) return '';
+  switch (action) {
+    case 'collect':
+      return block('搜尋查詢', ul(extra.queries)) + kv('原始結果數', extra.n_results);
+    case 'recall_memory':
+      return block('命中的跨場記憶', (extra.hits || []).map(h =>
+        `<div class="quote"><b>[${esc(h.topic || h.collection || '')}${h.round_id ? ' · ' + h.round_id : ''}]</b>${h.distance != null ? ' (distance ' + h.distance.toFixed(3) + ')' : ''}<br>${esc(h.text)}</div>`
+      ).join(''));
+    case 'design_interview_guide':
+      return block('訪綱', ul(extra.questions));
+    case 'interview_turn':
+      return `<div class="quote"><b>問（第 ${esc(extra.round)} 輪 · 對象：${esc(extra.user_name)}）：</b>${esc(extra.question)}</div><div class="quote"><b>答：</b>${esc(extra.answer)}</div>`;
+    case 'extract_insights':
+      return block('萃取洞見', ul(extra.insights));
+    case 'write_pov_hmw':
+      return block('POV', `<p>${esc(extra.pov)}</p>`) + block('HMW', `<p>${esc(extra.hmw)}</p>`);
+    case 'draft_proposal':
+      return (extra.bmc_missing && extra.bmc_missing.length)
+        ? block('BMC 缺漏欄位', ul(extra.bmc_missing))
+        : '<div class="detail-note">BMC 九宮格已通過完整性檢查（完整內容可在該 persona 的「發表」事件查看）</div>';
+    case 'refine':
+      return kv('修正輪次', extra.round) + kv('embedding 位移', extra.embedding_distance) +
+        kv('自評分數變化', `${extra.self_score_before} → ${extra.self_score_after}（Δ${extra.self_score_delta > 0 ? '+' : ''}${extra.self_score_delta}）`);
+    case 'homework_done':
+      return kv('耗時', extra.elapsed_s ? extra.elapsed_s.toFixed(1) + ' 秒' : '');
+    case 'facilitator_decide':
+      return kv('第幾輪', extra.round) + kv('動作', extra.action) + kv('指定人選', extra.chosen_persona_name) +
+        block('理由', extra.reason ? `<p>${esc(extra.reason)}</p>` : '') +
+        kv('已用預算', extra.budget_used_usd != null ? '$' + extra.budget_used_usd.toFixed(4) : '');
+    case 'give_feedback':
+      return kv('是否回應了 HMW', extra.hmw_addressed === true ? '是' : (extra.hmw_addressed === false ? '否' : '')) +
+        block('理由', extra.hmw_addressed_reason ? `<p>${esc(extra.hmw_addressed_reason)}</p>` : '') +
+        block('✅ 認同', ul(extra.agreements)) +
+        block('❌ 異議', ul(extra.disagreements)) +
+        block('💡 洞見', ul(extra.insights));
+    case 'revise_after_feedback':
+      return kv('回應的評論者', (extra.addressed_reviewer_ids || []).join(', '));
+    case 'master_critique':
+      return kv('評論視角', extra.angle) + block('點評內容', extra.critique ? `<p>${esc(extra.critique)}</p>` : '') + kv('最看好', extra.top_pick_persona);
+    case 'write_wisdom':
+      return kv('寫入集體智慧筆數', extra.wisdom_written) + kv('寫入訪談逐字稿筆數', extra.interviews_written);
+    case 'score_proposal':
+      return kv('評分者', extra.rater_name) + kv('對象', extra.target_persona_id) + kv('分數', extra.score) +
+        block('理由', extra.reason ? `<p>${esc(extra.reason)}</p>` : '');
+    case 'run_collective_scoring':
+      return block('Top-K 入選', ul(extra.top_k_ids)) +
+        block('各人平均分／標準差', ul(Object.entries(extra.aggregates || {}).map(([k, v]) => `${k}：平均 ${v.mean}，標準差 ${v.stdev}（n=${v.n}）`)));
+    case 'test_prototype':
+      return block('模擬用戶反應', extra.reaction ? `<div class="quote">${esc(extra.reaction)}</div>` : '');
+    case 'refine_after_test':
+      return kv('embedding 位移', extra.embedding_distance);
+    case 'three_lens_check':
+      return block('👍 正面', ul(extra.positive)) + block('👎 負面', ul(extra.negative)) + block('💡 洞見', ul(extra.insight));
+    default:
+      return '<pre>' + escapeHtml(JSON.stringify(extra, null, 2)) + '</pre>';
+  }
+}
+
+function renderDetail(e) {
+  if (e.detail && e.detail.kind === 'proposal') return renderProposal(e.detail.proposal, e.detail.note);
+  if (e.detail && e.detail.kind === 'prototype') return renderPrototype(e.detail.prototype);
+  return renderExtraGeneric(e.action, e.extra);
+}
+
 function goTo(idx) {
   if (idx < 0 || idx >= EVENTS.length) return;
   cursor = idx;
@@ -320,11 +537,10 @@ function goTo(idx) {
   if (activeRow) activeRow.scrollIntoView({block: 'nearest'});
 
   const e = EVENTS[idx];
-  const extra = e.extra ? '<pre>' + escapeHtml(JSON.stringify(e.extra, null, 2)) + '</pre>' : '';
   document.getElementById('detailPanel').innerHTML = `
     <div class="role" style="color:${e._color}">${e.role} — ${e.node} / ${e.action}</div>
-    <div>${escapeHtml(e.summary || '')}</div>
-    ${extra}`;
+    <div class="summary-line">${escapeHtml(e.summary || '')}</div>
+    ${renderDetail(e)}`;
 
   document.getElementById('progressText').textContent = `${idx + 1} / ${EVENTS.length}`;
   document.getElementById('costText').textContent = '$' + cumulativeCost.toFixed(4);
@@ -368,6 +584,7 @@ def main() -> None:
 
     events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines() if line.strip()]
     run_data = json.loads(run_json_path.read_text(encoding="utf-8"))
+    _attach_details(events, run_data)
     comparison = compute_comparison(run_data)
     title = f"{run_data.get('topic', '')}".strip() or "Agentic Brainstorming"
 

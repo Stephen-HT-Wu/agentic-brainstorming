@@ -118,6 +118,71 @@ class SumDisplayCostTests(unittest.TestCase):
         self.assertAlmostEqual(br.sum_display_cost(events), 0.668, places=3)
 
 
+class AttachDetailsTests(unittest.TestCase):
+    """使用者要求「點每一步都能看到做了什麼功課、形成的意見是什麼」——present／
+    baseline／原型事件要串上 run_data 裡的完整資料，且不能洩漏本機絕對路徑。"""
+
+    def _run_data(self):
+        return {
+            "idea_pool_versions": [{
+                "persona_id": "a", "persona_name": "林美華",
+                "before_title": "初版標題",
+                "proposal_after": {"title": "修正版標題", "bmc": {}},
+            }],
+            "prototypes": [{
+                "persona_id": "mei", "persona_name": "林美華",
+                "html_path": "/Users/someone/demo_workspace/outputs/prototypes/demo-sample-round2-mei.html",
+                "landing_page": {"headline": "h"},
+            }],
+            "baseline": {"proposal": {"title": "baseline 標題"}},
+        }
+
+    def test_present_event_gets_full_proposal_matched_by_persona_name(self):
+        events = [{"role": "persona:林美華", "action": "present"}]
+        br._attach_details(events, self._run_data())
+        self.assertEqual(events[0]["detail"]["kind"], "proposal")
+        self.assertEqual(events[0]["detail"]["proposal"]["title"], "修正版標題")
+        self.assertIn("初版標題", events[0]["detail"]["note"])
+
+    def test_baseline_event_gets_baseline_proposal(self):
+        events = [{"role": "baseline", "action": "baseline"}]
+        br._attach_details(events, self._run_data())
+        self.assertEqual(events[0]["detail"]["proposal"]["title"], "baseline 標題")
+
+    def test_generate_prototype_event_gets_prototype_detail(self):
+        events = [{"role": "persona:林美華", "action": "generate_prototype"}]
+        br._attach_details(events, self._run_data())
+        self.assertEqual(events[0]["detail"]["kind"], "prototype")
+        self.assertEqual(events[0]["detail"]["prototype"]["landing_page"]["headline"], "h")
+
+    def test_attached_prototype_detail_also_has_leaked_path_scrubbed(self):
+        """不只 extra.html_path，attach 進 detail 的完整 prototype 物件本身的
+        html_path 也是同一份本機絕對路徑，兩個地方都要清乾淨。"""
+        events = [{"role": "persona:林美華", "action": "generate_prototype"}]
+        br._attach_details(events, self._run_data())
+        self.assertEqual(events[0]["detail"]["prototype"]["html_path"], "prototype-mei.html")
+
+    def test_leaked_absolute_html_path_replaced_with_clean_relative_path(self):
+        """真實踩到的坑：generate_prototype 的 extra.html_path 是本機絕對路徑
+        （demo_workspace/outputs/prototypes/...），直接內嵌進公開的 replay.html
+        會洩漏本機使用者名稱與資料夾結構。"""
+        events = [{
+            "role": "persona:林美華", "action": "generate_prototype",
+            "extra": {"html_path": "/Users/stephen/agentic-brainstorming/practice/stage10/demo_workspace/outputs/prototypes/demo-sample-round2-mei.html"},
+        }]
+        br._attach_details(events, self._run_data())
+        self.assertEqual(events[0]["extra"]["html_path"], "prototype-mei.html")
+        self.assertNotIn("/Users/", events[0]["extra"]["html_path"])
+
+    def test_unmatched_persona_falls_back_to_basename_not_full_path(self):
+        events = [{
+            "role": "persona:不存在的人", "action": "generate_prototype",
+            "extra": {"html_path": "/Users/stephen/secret/prototypes/x.html"},
+        }]
+        br._attach_details(events, self._run_data())
+        self.assertEqual(events[0]["extra"]["html_path"], "x.html")
+
+
 class RoleColorTests(unittest.TestCase):
     def test_special_roles_get_fixed_colors(self):
         cache = {}
