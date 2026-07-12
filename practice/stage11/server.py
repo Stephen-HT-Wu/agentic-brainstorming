@@ -36,6 +36,8 @@ STATIC_DIR = STAGE11_DIR / "static"
 
 PERSONAS_REAL = PRACTICE_DIR / "personas.yaml"
 PERSONAS_EXAMPLE = PRACTICE_DIR / "personas.example.yaml"
+USERS_REAL = PRACTICE_DIR / "users.yaml"
+USERS_EXAMPLE = PRACTICE_DIR / "users.example.yaml"
 
 sys.path.insert(0, str(STAGE10_DIR))
 import build_replay  # noqa: E402
@@ -107,6 +109,15 @@ def get_personas():
     return {"personas": data.get("personas", []), "source": "real" if path == PERSONAS_REAL else "example"}
 
 
+@app.get("/api/users")
+def get_users():
+    # 唯讀：使用者只要求「看得到被訪談者的人物設定」，沒要求在即時面板編輯
+    # 模擬用戶，所以不提供 PUT——跟 /api/personas 一樣走 dual-track fallback。
+    path = USERS_REAL if USERS_REAL.exists() else USERS_EXAMPLE
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return {"users": data.get("users", []), "source": "real" if path == USERS_REAL else "example"}
+
+
 @app.put("/api/personas")
 def put_personas(body: PersonasRequest):
     for p in body.personas:
@@ -166,6 +177,18 @@ def list_runs():
 def run_status(run_id: str):
     _run_dir(run_id)
     return _current_status(run_id)
+
+
+@app.get("/api/runs/{run_id}/config")
+def run_config(run_id: str):
+    # run_worker.cmd_start() 存的這場 run 實際用的 personas/users 快照——
+    # 跟 /api/personas、/api/users 不是同一份資料：那兩個反映的是設定畫面
+    # 「現在」的狀態，這場 run 可能早就開始了，或者是 --example-config
+    # 但使用者真實設定檔存在，兩者內容會對不起來。即時畫面顯示這場 run
+    # 的事件細節（persona_id／user_id 解析成姓名、被訪談者人物設定）要用
+    # 這份快照，不能用 /api/personas、/api/users。
+    run_dir = _run_dir(run_id)
+    return _read_json(run_dir / "config_snapshot.json", {"personas": [], "users": []})
 
 
 @app.post("/api/runs/{run_id}/resume")
@@ -237,7 +260,10 @@ def get_replay(run_id: str):
     build_replay._attach_details(events, run_data)
     comparison = build_replay.compute_comparison(run_data)
     title = run_data.get("topic", run_id)
-    html = build_replay.build_replay_html(events, comparison, title)
+    html = build_replay.build_replay_html(
+        events, comparison, title,
+        personas=run_data.get("personas"), users=run_data.get("users"),
+    )
     return HTMLResponse(html)
 
 

@@ -180,7 +180,10 @@ def _role_color(role: str, palette_cache: dict) -> str:
     return palette_cache[role]
 
 
-def build_replay_html(events: list, comparison: dict, title: str) -> str:
+def build_replay_html(
+    events: list, comparison: dict, title: str,
+    *, personas: list | None = None, users: list | None = None,
+) -> str:
     palette_cache: dict = {}
     roles = sorted({e.get("role", "system") for e in events})
     legend = [{"role": r, "color": _role_color(r, palette_cache)} for r in roles]
@@ -190,11 +193,24 @@ def build_replay_html(events: list, comparison: dict, title: str) -> str:
     events_json = json.dumps(events, ensure_ascii=False)
     comparison_json = json.dumps(comparison, ensure_ascii=False)
     legend_json = json.dumps(legend, ensure_ascii=False)
+    # 使用者要求：互評/評分/收斂等事件裡到處混著英文 persona_id（例如
+    # target_persona_id="alex"）跟中文姓名（例如 role="persona:陳建宏"），
+    # 名字時中時英很難認人；還要看得到被訪談的模擬用戶「人物設定」（不是
+    # 只有名字），才知道他們的反應是基於什麼理由——這兩者都要在畫面上
+    # 解析 id，所以把完整的 personas／users 清單（含 role/background/focus
+    # 跟 age/context/pain_points/tone）內嵌進頁面，交給 JS 端統一解析、
+    # 顯示。舊的 run JSON（這個功能上線前跑的）沒有這兩個欄位，
+    # `personas`/`users` 參數預設 None、空清單一樣能跑，只是解析不到就
+    # 原樣顯示 id（見 JS 端 personaName() 的 fallback）。
+    personas_json = json.dumps(personas or [], ensure_ascii=False)
+    users_json = json.dumps(users or [], ensure_ascii=False)
 
     return HTML_TEMPLATE.replace("__TITLE__", title) \
         .replace("__EVENTS_JSON__", events_json) \
         .replace("__COMPARISON_JSON__", comparison_json) \
-        .replace("__LEGEND_JSON__", legend_json)
+        .replace("__LEGEND_JSON__", legend_json) \
+        .replace("__PERSONAS_JSON__", personas_json) \
+        .replace("__USERS_JSON__", users_json)
 
 
 HTML_TEMPLATE = r"""<!doctype html>
@@ -322,6 +338,8 @@ HTML_TEMPLATE = r"""<!doctype html>
 const EVENTS = __EVENTS_JSON__;
 const COMPARISON = __COMPARISON_JSON__;
 const LEGEND = __LEGEND_JSON__;
+const PERSONAS = __PERSONAS_JSON__;
+const USERS = __USERS_JSON__;
 
 function renderCompareTable() {
   const c = COMPARISON;
@@ -407,6 +425,26 @@ function block(title, html) {
   return `<div class="detail-block"><div class="detail-block-title">${esc(title)}</div>${html}</div>`;
 }
 
+// 使用者反應：互評/評分/收斂等事件的 extra 裡到處混著英文 persona_id
+// （例如 target_persona_id="alex"）跟中文姓名（role="persona:陳建宏"），
+// 認人很累。統一解析成姓名——找不到就照原樣顯示（対舊 run JSON 沒有
+// PERSONAS 資料時的防呆，也對「值本來就已經是名字」的情況安全）。
+function personaName(idOrName) {
+  if (!idOrName) return idOrName;
+  const hit = PERSONAS.find(p => p.id === idOrName);
+  return hit ? hit.name : idOrName;
+}
+
+function renderUserProfile(user) {
+  if (!user) return '';
+  let html = '';
+  if (user.age !== undefined && user.age !== null) html += kv('年齡', user.age);
+  html += block('情境', user.context ? `<p>${esc(user.context)}</p>` : '');
+  html += block('痛點', ul(user.pain_points));
+  html += kv('說話口吻', user.tone);
+  return html;
+}
+
 const BMC_ORDER = ["客群","價值主張","通路","顧客關係","收益流","關鍵資源","關鍵活動","關鍵夥伴","成本結構"];
 
 function renderBmc(bmc) {
@@ -454,7 +492,10 @@ function renderPrototype(proto) {
   html += block('功能', ul((lp.features || []).map(f => `${f.title}：${f.desc}`)));
   html += block('測試後修改內容', proto.diff_text ? `<pre>${esc(proto.diff_text)}</pre>` : '');
   if (proto.reactions && proto.reactions.length) {
-    html += block('模擬用戶反應', proto.reactions.map(r => `<div class="quote"><b>${esc(r.user_name)}：</b>${esc(r.reaction)}</div>`).join(''));
+    html += block('模擬用戶反應', proto.reactions.map(r => {
+      const profile = renderUserProfile(USERS.find(u => u.id === r.user_id || u.name === r.user_name));
+      return `<div class="quote"><b>${esc(r.user_name)}：</b>${esc(r.reaction)}</div>` + (profile ? `<div class="detail-note">${esc(r.user_name)} 的人物設定</div>${profile}` : '');
+    }).join(''));
   }
   html += kv('原型檔案', proto.html_path);
   return html;
@@ -472,7 +513,8 @@ function renderExtraGeneric(action, extra) {
     case 'design_interview_guide':
       return block('訪綱', ul(extra.questions));
     case 'interview_turn':
-      return `<div class="quote"><b>問（第 ${esc(extra.round)} 輪 · 對象：${esc(extra.user_name)}）：</b>${esc(extra.question)}</div><div class="quote"><b>答：</b>${esc(extra.answer)}</div>`;
+      return `<div class="quote"><b>問（第 ${esc(extra.round)} 輪 · 對象：${esc(extra.user_name)}）：</b>${esc(extra.question)}</div><div class="quote"><b>答：</b>${esc(extra.answer)}</div>` +
+        block('被訪談者的人物設定', renderUserProfile(USERS.find(u => u.id === extra.user_id)));
     case 'extract_insights':
       return block('萃取洞見', ul(extra.insights));
     case 'write_pov_hmw':
@@ -497,19 +539,20 @@ function renderExtraGeneric(action, extra) {
         block('❌ 異議', ul(extra.disagreements)) +
         block('💡 洞見', ul(extra.insights));
     case 'revise_after_feedback':
-      return kv('回應的評論者', (extra.addressed_reviewer_ids || []).join(', '));
+      return kv('回應的評論者', (extra.addressed_reviewer_ids || []).map(personaName).join(', '));
     case 'master_critique':
-      return kv('評論視角', extra.angle) + block('點評內容', extra.critique ? `<p>${esc(extra.critique)}</p>` : '') + kv('最看好', extra.top_pick_persona);
+      return kv('評論視角', extra.angle) + block('點評內容', extra.critique ? `<p>${esc(extra.critique)}</p>` : '') + kv('最看好', personaName(extra.top_pick_persona));
     case 'write_wisdom':
       return kv('寫入集體智慧筆數', extra.wisdom_written) + kv('寫入訪談逐字稿筆數', extra.interviews_written);
     case 'score_proposal':
-      return kv('評分者', extra.rater_name) + kv('對象', extra.target_persona_id) + kv('分數', extra.score) +
+      return kv('評分者', extra.rater_name) + kv('對象', personaName(extra.target_persona_id)) + kv('分數', extra.score) +
         block('理由', extra.reason ? `<p>${esc(extra.reason)}</p>` : '');
     case 'run_collective_scoring':
-      return block('Top-K 入選', ul(extra.top_k_ids)) +
-        block('各人平均分／標準差', ul(Object.entries(extra.aggregates || {}).map(([k, v]) => `${k}：平均 ${v.mean}，標準差 ${v.stdev}（n=${v.n}）`)));
+      return block('Top-K 入選', ul((extra.top_k_ids || []).map(personaName))) +
+        block('各人平均分／標準差', ul(Object.entries(extra.aggregates || {}).map(([k, v]) => `${personaName(k)}：平均 ${v.mean}，標準差 ${v.stdev}（n=${v.n}）`)));
     case 'test_prototype':
-      return block('模擬用戶反應', extra.reaction ? `<div class="quote">${esc(extra.reaction)}</div>` : '');
+      return block('模擬用戶反應', extra.reaction ? `<div class="quote">${esc(extra.reaction)}</div>` : '') +
+        block('被訪談者的人物設定', renderUserProfile(USERS.find(u => u.id === extra.user_id)));
     case 'refine_after_test':
       return kv('embedding 位移', extra.embedding_distance);
     case 'three_lens_check':
@@ -588,7 +631,10 @@ def main() -> None:
     comparison = compute_comparison(run_data)
     title = f"{run_data.get('topic', '')}".strip() or "Agentic Brainstorming"
 
-    html = build_replay_html(events, comparison, title)
+    html = build_replay_html(
+        events, comparison, title,
+        personas=run_data.get("personas"), users=run_data.get("users"),
+    )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(html, encoding="utf-8")
 

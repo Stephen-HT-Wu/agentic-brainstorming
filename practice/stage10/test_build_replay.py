@@ -215,6 +215,34 @@ class BuildReplayHtmlTests(unittest.TestCase):
         self.assertIn("const EVENTS = [", html)
         self.assertIn("測試", html)
 
+    def test_defaults_to_empty_personas_and_users_when_omitted(self):
+        """使用者要求：互評/評分等事件裡到處混著英文 persona_id 跟中文姓名，
+        統一解析成姓名要靠內嵌的 PERSONAS／USERS 清單——舊的 run JSON（這個
+        功能上線前跑的）沒有這兩個欄位，personas/users 沒給也不能整個崩掉，
+        要能退化成空清單（JS 端 personaName() 再退回顯示原始 id）。"""
+        html = br.build_replay_html([], {
+            "real_sources": {}, "bmc_completeness": {}, "diversity": {}, "revision_count": {},
+            "cross_round_memory": {}, "cost": {},
+            "master_critiques_count": 0, "three_lens_checks_count": 0, "human_qa_count": 0, "facilitator_rounds": 0,
+        }, "測試")
+        self.assertIn("const PERSONAS = [];", html)
+        self.assertIn("const USERS = [];", html)
+
+    def test_embeds_full_personas_and_users_when_provided(self):
+        html = br.build_replay_html(
+            [], {
+                "real_sources": {}, "bmc_completeness": {}, "diversity": {}, "revision_count": {},
+                "cross_round_memory": {}, "cost": {},
+                "master_critiques_count": 0, "three_lens_checks_count": 0, "human_qa_count": 0, "facilitator_rounds": 0,
+            }, "測試",
+            personas=[{"id": "alex", "name": "陳建宏", "role": "技術架構師"}],
+            users=[{"id": "commuter", "name": "陳小姐", "age": 32, "context": "通勤族", "pain_points": ["沒時間"], "tone": "直接"}],
+        )
+        self.assertIn('"id": "alex"', html)
+        self.assertIn("技術架構師", html)
+        self.assertIn('"id": "commuter"', html)
+        self.assertIn("通勤族", html)
+
 
 if __name__ == "__main__":
     unittest.main()

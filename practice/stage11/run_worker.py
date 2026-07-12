@@ -168,6 +168,19 @@ def cmd_start(args: argparse.Namespace) -> None:
     _patch_paths(run_dir, isolate_chroma=args.example_config)
     if args.example_config:
         _use_example_config()
+
+    # 這場 run 實際用的 personas/users 快照存下來，跟即時畫面自己的
+    # /api/personas／/api/users（反映的是「設定畫面現在長怎樣」，可能在
+    # 這場會議開始後又被改掉，或者這場是 --example-config 但使用者真實
+    # personas.yaml／users.yaml 存在，兩者根本不是同一份資料）分開——
+    # 不然前端解析 persona_id／user_id 找到的會是錯的（或找不到，人物設定
+    # 顯示不出來），跟使用者要的「看得到被訪談者是基於什麼理由回答」正好
+    # 相反。
+    (run_dir / "config_snapshot.json").write_text(
+        json.dumps({"personas": sg.load_personas(), "users": sg.load_users()}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
     os.environ["BRAINSTORM_TOPIC"] = args.topic
     sys.argv = ["graph.py", "--thread", args.thread, "--stop-after-first-interrupt"]
     _run_main_and_capture(args.thread, run_dir)

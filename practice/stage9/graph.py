@@ -1249,6 +1249,7 @@ def write_collective_wisdom(
 class ScoringTask(TypedDict):
     rater: dict
     target_persona_id: str
+    target_persona_name: str
     proposal: dict
 
 
@@ -1262,13 +1263,15 @@ def fan_out_scoring(state: ScoringPanelState) -> List[Send]:
     """N 位 persona 交叉評分彼此的最終提案——不評自己的，這是『多 agent
     判斷聚合』的核心：最後的排名不是任何單一 agent（包括 Facilitator／
     大師）說了算，是全體評分平均出來的。"""
+    id_to_name = {p.get("id"): p.get("name") for p in state["personas"]}
     sends = []
     for rater in state["personas"]:
         for pid, proposal in state["final_proposals"].items():
             if pid == rater.get("id"):
                 continue
             sends.append(Send("score_proposal", {
-                "rater": rater, "target_persona_id": pid, "proposal": proposal,
+                "rater": rater, "target_persona_id": pid,
+                "target_persona_name": id_to_name.get(pid, pid), "proposal": proposal,
             }))
     return sends
 
@@ -1297,12 +1300,14 @@ def score_proposal(task: ScoringTask) -> dict:
     except (TypeError, ValueError):
         score = 5.0  # 保底中位數，解析失敗不能讓平均分被污染成 0
     reason = _safe_str(data.get("reason")) or "（系統保底）評分理由缺失。"
+    target_name = task.get("target_persona_name") or task["target_persona_id"]
     result = {
         "rater_id": rater.get("id"), "rater_name": rater.get("name"),
-        "target_persona_id": task["target_persona_id"], "score": score, "reason": reason,
+        "target_persona_id": task["target_persona_id"], "target_persona_name": target_name,
+        "score": score, "reason": reason,
     }
     emit_event(
-        "score_proposal", f"{rater['name']} 評 {task['target_persona_id']}: {score}",
+        "score_proposal", f"{rater['name']} 評 {target_name}: {score}",
         role=_persona_label(rater), extra=result,
     )
     return {"scores": [result]}
@@ -1493,7 +1498,7 @@ def generate_prototype_and_test(task: PrototypeTask) -> dict:
             reactions.append({"user_id": user.get("id"), "user_name": user.get("name"), "reaction": reaction})
             emit_event(
                 "test_prototype", f"{user.get('name')} 對 {persona['name']} 原型的反應",
-                extra={"reaction": reaction},
+                extra={"user_id": user.get("id"), "user_name": user.get("name"), "reaction": reaction},
             )
 
         # 3) 最終修正：根據真實反應調整，不是照單全收也不是完全不理
@@ -1569,6 +1574,7 @@ prototype_test_graph = build_prototype_test_subgraph()
 class ThreeLensTask(TypedDict):
     persona: dict
     target_persona_id: str
+    target_persona_name: str
     proposal: dict
 
 
@@ -1581,9 +1587,11 @@ class ThreeLensPanelState(TypedDict):
 def fan_out_three_lens(state: ThreeLensPanelState) -> List[Send]:
     """N 位 persona × K 個 top 提案，每一格都要做——包含自己評自己的提案，
     這是刻意的：三鏡檢核是『全員共同動作』，不是同儕互評那種排除自己。"""
+    id_to_name = {p.get("id"): p.get("name") for p in state["personas"]}
     return [
         Send("three_lens_check", {
-            "persona": persona, "target_persona_id": pid, "proposal": proposal,
+            "persona": persona, "target_persona_id": pid,
+            "target_persona_name": id_to_name.get(pid, pid), "proposal": proposal,
         })
         for persona in state["personas"]
         for pid, proposal in state["top_k_proposals"].items()
@@ -1611,15 +1619,16 @@ def three_lens_check(task: ThreeLensTask) -> dict:
         data = extract_json_object(raw)
     finally:
         _event_role.reset(role_token)
+    target_name = task.get("target_persona_name") or task["target_persona_id"]
     result = {
         "persona_id": persona.get("id"), "persona_name": persona.get("name"),
-        "target_persona_id": task["target_persona_id"],
+        "target_persona_id": task["target_persona_id"], "target_persona_name": target_name,
         "positive": _pad_to_three(data.get("positive"), "正面"),
         "negative": _pad_to_three(data.get("negative"), "負面"),
         "insight": _pad_to_three(data.get("insight"), "洞見"),
     }
     emit_event(
-        "three_lens_check", f"{persona['name']} 對 {task['target_persona_id']} 的三鏡檢核",
+        "three_lens_check", f"{persona['name']} 對 {target_name} 的三鏡檢核",
         role=_persona_label(persona), extra=result,
     )
     return {"checks": [result]}
@@ -2018,8 +2027,10 @@ def run_collective_scoring(state: MeetingState) -> dict:
     aggregates = compute_score_aggregates(scores, list(final_proposals.keys()))
     k = min(TOP_K, len(final_proposals))
     top_k_ids = select_top_k(aggregates, k)
+    id_to_name = {p.get("id"): p.get("name") for p in state["personas"]}
+    top_k_names = [id_to_name.get(pid, pid) for pid in top_k_ids]
     emit_event(
-        "run_collective_scoring", f"評分完成，top-{k}：{top_k_ids}",
+        "run_collective_scoring", f"評分完成，top-{k}：{top_k_names}",
         extra={"aggregates": aggregates, "top_k_ids": top_k_ids},
     )
     print("  [collective_scoring] 評分聚合：")
@@ -2184,6 +2195,8 @@ def save_outputs(
         "topic": topic,
         "persona_count": len(personas),
         "user_count": len(users),
+        "personas": personas,
+        "users": users,
         "facilitator_log": facilitator_log,
         "human_qa_log": human_qa_log,
         "idea_pool_versions": idea_pool_versions,
@@ -2233,6 +2246,7 @@ def build_final_report_markdown(
     diversity_before: dict,
     diversity_after: dict,
 ) -> str:
+    id_to_name = {p.get("id"): p.get("name") for p in personas}
     L: List[str] = []
     L.append(f"# 腦力激盪會議最終報告\n")
     L.append(f"- **主題**：{topic}")
@@ -2266,7 +2280,7 @@ def build_final_report_markdown(
     L.append("|---|---|---|---|")
     for pid, agg in sorted(score_aggregates.items(), key=lambda kv: kv[1]["mean"], reverse=True):
         marker = "★" if pid in top_k_ids else ""
-        L.append(f"| {pid} | {agg['mean']} | {agg['stdev']} | {marker} |")
+        L.append(f"| {id_to_name.get(pid, pid)} | {agg['mean']} | {agg['stdev']} | {marker} |")
     L.append("")
 
     L.append("## Top-K 最終提案詳情\n")

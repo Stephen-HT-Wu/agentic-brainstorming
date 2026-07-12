@@ -216,6 +216,25 @@ function block(title, html) {
   if (!html) return '';
   return `<div class="detail-block"><div class="detail-block-title">${esc(title)}</div>${html}</div>`;
 }
+// 使用者反應：互評/評分/收斂等事件的 extra 裡到處混著英文 persona_id
+// （例如 target_persona_id="alex"）跟中文姓名（role="persona:陳建宏"），
+// 認人很累。統一解析成姓名——找不到就照原樣顯示。
+function personaName(idOrName) {
+  if (!idOrName) return idOrName;
+  const hit = runPersonas.find(p => p.id === idOrName);
+  return hit ? hit.name : idOrName;
+}
+
+function renderUserProfile(user) {
+  if (!user) return '';
+  let html = '';
+  if (user.age !== undefined && user.age !== null) html += kv('年齡', user.age);
+  html += block('情境', user.context ? `<p>${esc(user.context)}</p>` : '');
+  html += block('痛點', ul(user.pain_points));
+  html += kv('說話口吻', user.tone);
+  return html;
+}
+
 const BMC_ORDER = ["客群","價值主張","通路","顧客關係","收益流","關鍵資源","關鍵活動","關鍵夥伴","成本結構"];
 function renderBmc(bmc) {
   if (!bmc) return '';
@@ -256,7 +275,10 @@ function renderPrototype(proto) {
   html += block('概念一頁書', lp.concept_one_pager ? `<p>${esc(lp.concept_one_pager)}</p>` : '');
   html += block('功能', ul((lp.features || []).map(f => `${f.title}：${f.desc}`)));
   html += block('測試後修改內容', proto.diff_text ? `<pre>${esc(proto.diff_text)}</pre>` : '');
-  if (proto.reactions && proto.reactions.length) html += block('模擬用戶反應', proto.reactions.map(r => `<div class="quote"><b>${esc(r.user_name)}：</b>${esc(r.reaction)}</div>`).join(''));
+  if (proto.reactions && proto.reactions.length) html += block('模擬用戶反應', proto.reactions.map(r => {
+    const profile = renderUserProfile(runUsers.find(u => u.id === r.user_id || u.name === r.user_name));
+    return `<div class="quote"><b>${esc(r.user_name)}：</b>${esc(r.reaction)}</div>` + (profile ? `<div class="detail-note">${esc(r.user_name)} 的人物設定</div>${profile}` : '');
+  }).join(''));
   html += kv('原型檔案', proto.html_path);
   return html;
 }
@@ -270,7 +292,8 @@ function renderExtraGeneric(action, extra) {
     case 'recall_memory': return block('命中的跨場記憶', (extra.hits || []).map(h =>
         `<div class="quote"><b>[${esc(h.topic || h.collection || '')}${h.round_id ? ' · ' + h.round_id : ''}]</b>${h.distance != null ? ' (distance ' + h.distance.toFixed(3) + ')' : ''}<br>${esc(h.text)}</div>`).join(''));
     case 'design_interview_guide': return block('訪綱', ul(extra.questions));
-    case 'interview_turn': return `<div class="quote"><b>問（第 ${esc(extra.round)} 輪 · 對象：${esc(extra.user_name)}）：</b>${esc(extra.question)}</div><div class="quote"><b>答：</b>${esc(extra.answer)}</div>`;
+    case 'interview_turn': return `<div class="quote"><b>問（第 ${esc(extra.round)} 輪 · 對象：${esc(extra.user_name)}）：</b>${esc(extra.question)}</div><div class="quote"><b>答：</b>${esc(extra.answer)}</div>` +
+      block('被訪談者的人物設定', renderUserProfile(runUsers.find(u => u.id === extra.user_id)));
     case 'extract_insights': return block('萃取洞見', ul(extra.insights));
     case 'write_pov_hmw': return block('POV', `<p>${esc(extra.pov)}</p>`) + block('HMW', `<p>${esc(extra.hmw)}</p>`);
     case 'draft_proposal': return (extra.bmc_missing && extra.bmc_missing.length) ? block('BMC 缺漏欄位', ul(extra.bmc_missing)) : '<div class="detail-note">BMC 九宮格已通過完整性檢查（完整內容可在該 persona 的「發表」事件查看，或等會議跑完看回放頁）</div>';
@@ -278,12 +301,13 @@ function renderExtraGeneric(action, extra) {
     case 'homework_done': return kv('耗時', extra.elapsed_s ? extra.elapsed_s.toFixed(1) + ' 秒' : '');
     case 'facilitator_decide': return kv('第幾輪', extra.round) + kv('動作', extra.action) + kv('指定人選', extra.chosen_persona_name) + block('理由', extra.reason ? `<p>${esc(extra.reason)}</p>` : '') + kv('已用預算', extra.budget_used_usd != null ? '$' + extra.budget_used_usd.toFixed(4) : '');
     case 'give_feedback': return kv('是否回應了 HMW', extra.hmw_addressed === true ? '是' : (extra.hmw_addressed === false ? '否' : '')) + block('理由', extra.hmw_addressed_reason ? `<p>${esc(extra.hmw_addressed_reason)}</p>` : '') + block('✅ 認同', ul(extra.agreements)) + block('❌ 異議', ul(extra.disagreements)) + block('💡 洞見', ul(extra.insights));
-    case 'revise_after_feedback': return kv('回應的評論者', (extra.addressed_reviewer_ids || []).join(', '));
-    case 'master_critique': return kv('評論視角', extra.angle) + block('點評內容', extra.critique ? `<p>${esc(extra.critique)}</p>` : '') + kv('最看好', extra.top_pick_persona);
+    case 'revise_after_feedback': return kv('回應的評論者', (extra.addressed_reviewer_ids || []).map(personaName).join(', '));
+    case 'master_critique': return kv('評論視角', extra.angle) + block('點評內容', extra.critique ? `<p>${esc(extra.critique)}</p>` : '') + kv('最看好', personaName(extra.top_pick_persona));
     case 'write_wisdom': return kv('寫入集體智慧筆數', extra.wisdom_written) + kv('寫入訪談逐字稿筆數', extra.interviews_written);
-    case 'score_proposal': return kv('評分者', extra.rater_name) + kv('對象', extra.target_persona_id) + kv('分數', extra.score) + block('理由', extra.reason ? `<p>${esc(extra.reason)}</p>` : '');
-    case 'run_collective_scoring': return block('Top-K 入選', ul(extra.top_k_ids)) + block('各人平均分／標準差', ul(Object.entries(extra.aggregates || {}).map(([k, v]) => `${k}：平均 ${v.mean}，標準差 ${v.stdev}（n=${v.n}）`)));
-    case 'test_prototype': return block('模擬用戶反應', extra.reaction ? `<div class="quote">${esc(extra.reaction)}</div>` : '');
+    case 'score_proposal': return kv('評分者', extra.rater_name) + kv('對象', personaName(extra.target_persona_id)) + kv('分數', extra.score) + block('理由', extra.reason ? `<p>${esc(extra.reason)}</p>` : '');
+    case 'run_collective_scoring': return block('Top-K 入選', ul((extra.top_k_ids || []).map(personaName))) + block('各人平均分／標準差', ul(Object.entries(extra.aggregates || {}).map(([k, v]) => `${personaName(k)}：平均 ${v.mean}，標準差 ${v.stdev}（n=${v.n}）`)));
+    case 'test_prototype': return block('模擬用戶反應', extra.reaction ? `<div class="quote">${esc(extra.reaction)}</div>` : '') +
+      block('被訪談者的人物設定', renderUserProfile(runUsers.find(u => u.id === extra.user_id)));
     case 'refine_after_test': return kv('embedding 位移', extra.embedding_distance);
     case 'three_lens_check': return block('👍 正面', ul(extra.positive)) + block('👎 負面', ul(extra.negative)) + block('💡 洞見', ul(extra.insight));
     default: return '<pre>' + escapeHtml(JSON.stringify(extra, null, 2)) + '</pre>';
@@ -337,6 +361,13 @@ function switchView(name) {
 
 // ---------- 設定畫面：persona 編輯 ----------
 let personas = [];
+let users = [];  // 唯讀，只用來在事件細節裡解析「被訪談者的人物設定」
+
+async function loadUsers() {
+  const res = await fetch('/api/users');
+  const data = await res.json();
+  users = data.users;
+}
 
 function personaCardHtml(p, idx) {
   return `
@@ -466,6 +497,20 @@ let currentRunId = null;
 let currentEventSource = null;
 let currentEvents = [];
 let selectedEventIdx = null;
+// 這場正在看的 run 實際用的 personas/users 快照——跟設定畫面的 personas／
+// users 分開，因為設定畫面反映的是「現在」的狀態，可能在這場會議開始後
+//又被改掉，或者這場是 --example-config 但使用者真實設定檔存在，兩者對
+//不起來。事件細節裡解析 persona_id／user_id 一律要用這兩個，不能用
+// 設定畫面那兩個全域變數。
+let runPersonas = [];
+let runUsers = [];
+
+async function loadRunConfig(runId) {
+  const res = await fetch(`/api/runs/${runId}/config`);
+  const data = await res.json();
+  runPersonas = data.personas || [];
+  runUsers = data.users || [];
+}
 
 function laneOrder(role) {
   if (role === 'baseline') return 0;
@@ -490,7 +535,7 @@ function renderLanes() {
     const idxs = byRole[role];
     const color = roleColor(role);
     const name = roleDisplayName(role);
-    const personaMeta = personas.find(p => p.name === name);
+    const personaMeta = runPersonas.find(p => p.name === name);
     const roleLabel = personaMeta ? personaMeta.role : (role.startsWith('master:') ? '大師' : (role === 'facilitator' ? '主持人' : (role === 'baseline' ? 'Baseline 對照組' : '系統')));
     const avatar = avatarHtml(personaMeta ? personaMeta.id : role, name);
     const chips = idxs.map(idx => {
@@ -523,7 +568,7 @@ function setStatusBadge(status) {
 
 function showHitl(payload) {
   document.getElementById('hitlPanel').style.display = 'block';
-  const presonaMeta = personas.find(p => p.id === payload.presenter_id);
+  const presonaMeta = runPersonas.find(p => p.id === payload.presenter_id);
   document.getElementById('hitlPresenter').innerHTML = `${avatarHtml(payload.presenter_id, payload.presenter_name, 'sm')} <b>${esc(payload.presenter_name)}</b>${presonaMeta ? '（' + esc(presonaMeta.role) + '）' : ''}`;
   document.getElementById('hitlProposal').innerHTML = `《${esc(payload.proposal_title)}》<br>${esc(payload.proposal_summary || '')}`;
   document.getElementById('hitlQuestions').textContent = `已經問過 ${payload.questions_asked_so_far || 0} 題`;
@@ -549,14 +594,17 @@ document.getElementById('btnAsk').addEventListener('click', () => {
 });
 document.getElementById('btnSkip').addEventListener('click', () => resumeRun('skip'));
 
-function openLiveRun(runId, topic) {
+async function openLiveRun(runId, topic) {
   currentRunId = runId;
   currentEvents = [];
   selectedEventIdx = null;
+  runPersonas = [];
+  runUsers = [];
   document.getElementById('liveTopic').textContent = topic || runId;
   document.getElementById('liveRunId').textContent = runId;
   document.getElementById('detailPanel').innerHTML = '<div class="role">點一個事件方塊看完整內容</div>';
   hideHitl();
+  await loadRunConfig(runId);  // 先拿到這場 run 實際用的 personas/users，事件才會從第一筆開始就正確解析成姓名/人物設定
   reconnectEvents();
 }
 
@@ -631,6 +679,7 @@ function openHistoryRun(runId, topic, status) {
 
 // ---------- 初始化 ----------
 loadPersonas();
+loadUsers();
 renderTopo();
 </script>
 </body></html>
