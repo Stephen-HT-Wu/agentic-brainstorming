@@ -491,7 +491,11 @@ def collect(state: HomeworkState) -> dict:
     emit_event(
         "collect",
         f"搜尋 {len(queries)} 組查詢，共 {len(raw)} 筆原始結果",
-        extra={"queries": queries, "n_results": len(raw)},
+        # 使用者要求能追溯「看了哪些網頁才形成後面的想法」——之前這裡只記
+        # 筆數，真正的 title/url/snippet 只活在記憶體裡的 raw_results，
+        # events.jsonl／存檔 JSON 完全沒有任何 URL。這裡把完整結果放進
+        # extra，畫面才有東西可以呈現研究足跡。
+        extra={"queries": queries, "n_results": len(raw), "results": raw},
     )
     return {"raw_results": raw}
 
@@ -500,7 +504,10 @@ def dedup(state: HomeworkState) -> dict:
     raw = state["raw_results"]
     items = dedup_by_embedding(raw)
     print(f"  [dedup:{state['persona'].get('name')}] {len(raw)} → {len(items)}（門檻 {DEDUP_SIMILARITY_THRESHOLD}）")
-    emit_event("dedup", f"embedding 去重 {len(raw)} → {len(items)}")
+    # 這份 items 就是真正流進 synthesize()/draft_proposal() 的
+    # research_items，是「最後真的形成想法依據」的那份清單，不是
+    # collect() 那份含重複的原始結果——兩邊都留著方便對照篩掉了什麼。
+    emit_event("dedup", f"embedding 去重 {len(raw)} → {len(items)}", extra={"items": items})
     return {"research_items": items}
 
 
@@ -878,6 +885,11 @@ def refine(state: HomeworkState) -> dict:
         "self_score_before": prev.get("self_score"),
         "self_score_after": nxt.get("self_score"),
         "self_score_delta": round(score_delta, 3),
+        # 使用者要求看到「agents 具體的成長弧線」，不是只有分數——
+        # _diff_proposals() 已經在 generate_prototype_and_test() 驗證過
+        # 能用（graph.py 原本的測試後修正那段），這裡純接線、不用多花
+        # LLM 成本或新寫 diff 邏輯。
+        "diff_text": _diff_proposals(prev, nxt),
     }
     print(
         f"  [refine:{persona.get('name')} #{round_i}] embed_dist={delta['embedding_distance']} "
@@ -1199,7 +1211,13 @@ def write_collective_wisdom(
     master_critiques: List[dict],
     idea_pool_versions: List[dict],
     persona_results: List[dict],
+    three_lens_checks: List[dict],
 ) -> dict:
+    # 使用者要求把各環節的 insight 也寫進 RAG，日後能重用——之前只寫
+    # 大師點評跟最終提案標題摘要跟訪談洞見，POV/HMW、同儕互評內容、三鏡
+    # 檢核結果、完整訪談逐字稿都是「算出來卻從沒進 RAG」。刻意不把原始
+    # 搜尋結果/URL 寫進來——那是雜訊不是洞見，項目1的「研究足跡」是給人
+    # 看的追溯功能，跟「該不該讓未來會議語意檢索到」是兩回事。
     now = datetime.now(timezone.utc).isoformat()
     wisdom_col = get_chroma_collection("wisdom")
     docs, metas, ids = [], [], []
@@ -1221,6 +1239,57 @@ def write_collective_wisdom(
             "persona": v["persona_name"], "created_at": now,
         })
         ids.append(f"{round_id}-proposal-{pid}")
+
+    for r in persona_results:
+        pid = r["persona"]["id"]
+        pname = r["persona"]["name"]
+        pov, hmw = r.get("pov"), r.get("hmw")
+        if pov or hmw:
+            docs.append(f"{pname} 的 POV：{pov} / HMW：{hmw}")
+            metas.append({
+                "round_id": round_id, "topic": topic, "doc_type": "pov_hmw",
+                "persona": pname, "created_at": now,
+            })
+            ids.append(f"{round_id}-povhmw-{pid}")
+
+    for version_idx, v in enumerate(idea_pool_versions):
+        presenter_pid = v["persona_id"]
+        for review in v.get("reviews") or []:
+            reviewer_id = review.get("reviewer_id", "?")
+            agreements = "；".join(review.get("agreements") or [])
+            disagreements = "；".join(review.get("disagreements") or [])
+            insights = "；".join(review.get("insights") or [])
+            docs.append(
+                f"{review.get('reviewer_name')} 對 {review.get('presenter_name')} 的互評："
+                f"認同：{agreements}｜異議：{disagreements}｜洞見：{insights}"
+            )
+            metas.append({
+                "round_id": round_id, "topic": topic, "doc_type": "peer_review",
+                "reviewer": review.get("reviewer_name"), "presenter": review.get("presenter_name"),
+                "created_at": now,
+            })
+            # 同一位 presenter 可能在多輪討論中被同一批人重複審閱（facilitator
+            # 讓她「加輪」回應異議時，會再跑一次 run_peer_review）——(reviewer,
+            # presenter) 這組 key 因此不保證唯一，真實跑測就撞過
+            # DuplicateIDError。version_idx 是 idea_pool_versions 裡的順位，
+            # 用它加進 id 保留每一輪的獨立內容，而不是覆蓋掉後面幾輪的回饋。
+            ids.append(f"{round_id}-review-{reviewer_id}-{presenter_pid}-v{version_idx}")
+
+    for c in three_lens_checks:
+        positive = "；".join(c.get("positive") or [])
+        negative = "；".join(c.get("negative") or [])
+        insight = "；".join(c.get("insight") or [])
+        docs.append(
+            f"{c.get('persona_name')} 對 {c.get('target_persona_name') or c.get('target_persona_id')} 的三鏡檢核："
+            f"正面：{positive}｜負面：{negative}｜洞見：{insight}"
+        )
+        metas.append({
+            "round_id": round_id, "topic": topic, "doc_type": "three_lens_check",
+            "persona": c.get("persona_name"), "target": c.get("target_persona_name") or c.get("target_persona_id"),
+            "created_at": now,
+        })
+        ids.append(f"{round_id}-threelens-{c.get('persona_id')}-{c.get('target_persona_id')}")
+
     if docs:
         wisdom_col.add(documents=docs, metadatas=metas, ids=ids)
 
@@ -1236,6 +1305,13 @@ def write_collective_wisdom(
                 "persona": pname, "created_at": now,
             })
             iids.append(f"{round_id}-insight-{pid}-{insight['id']}")
+        for turn in r.get("interview_transcript") or []:
+            idocs.append(f"[{turn.get('user_name')}] Q：{turn.get('question')} / A：{turn.get('answer')}")
+            imetas.append({
+                "round_id": round_id, "topic": topic, "doc_type": "interview_transcript",
+                "persona": pname, "user": turn.get("user_name"), "created_at": now,
+            })
+            iids.append(f"{round_id}-transcript-{pid}-{turn.get('user_id')}-r{turn.get('round')}")
     if idocs:
         interviews_col.add(documents=idocs, metadatas=imetas, ids=iids)
 
@@ -1666,6 +1742,7 @@ class MeetingState(TypedDict):
     persona_results: Annotated[List[dict], operator.add]
     next_presenter_id: Optional[str]
     pending_question: Optional[str]
+    pending_question_asked_by: Optional[str]
     human_qa_log: Annotated[List[dict], operator.add]
     review_log: Annotated[List[dict], operator.add]
     idea_pool_versions: Annotated[List[dict], operator.add]
@@ -1908,8 +1985,11 @@ def ask_question(state: MeetingState) -> dict:
     if isinstance(answer_signal, dict) and answer_signal.get("action") == "ask":
         question = _safe_str(answer_signal.get("question"))
         if question:
-            return {"pending_question": question}
-    return {"pending_question": None}
+            # 使用者要求 HITL 紀錄知道「誰問的」——不做真的身份驗證，就是
+            # 提問當下附帶的顯示名稱，沒填就記「匿名」。
+            asked_by = _safe_str(answer_signal.get("asked_by")) or "匿名"
+            return {"pending_question": question, "pending_question_asked_by": asked_by}
+    return {"pending_question": None, "pending_question_asked_by": None}
 
 
 def route_after_question(state: MeetingState) -> Literal["answer_question", "run_peer_review"]:
@@ -1941,6 +2021,7 @@ def answer_question(state: MeetingState) -> dict:
         "presenter_name": presenter.get("name"),
         "question": question,
         "answer": answer,
+        "asked_by": state.get("pending_question_asked_by") or "匿名",
     }
     emit_event(
         "human_qa",
@@ -1949,7 +2030,7 @@ def answer_question(state: MeetingState) -> dict:
         extra=qa_entry,
     )
     print(f"  [human_qa] Q: {question}\n             A: {answer}")
-    return {"human_qa_log": [qa_entry], "pending_question": None}
+    return {"human_qa_log": [qa_entry], "pending_question": None, "pending_question_asked_by": None}
 
 
 def run_peer_review(state: MeetingState) -> dict:
@@ -2018,6 +2099,7 @@ def write_wisdom(state: MeetingState) -> dict:
         master_critiques=state["master_critiques"],
         idea_pool_versions=state["idea_pool_versions"],
         persona_results=state["persona_results"],
+        three_lens_checks=state["three_lens_checks"],
     )
     emit_event("write_wisdom", f"寫入集體智慧庫：{stats}", extra=stats)
     print(f"  [write_wisdom] {stats}")
@@ -2092,11 +2174,16 @@ def build_parent_graph(checkpointer):
     )
     g.add_edge("answer_question", "ask_question")
     g.add_edge("run_peer_review", "facilitator_decide")
-    g.add_edge("run_masters", "write_wisdom")
-    g.add_edge("write_wisdom", "run_collective_scoring")
+    # write_wisdom 刻意排在 run_three_lens_check 之後、真正的會議尾聲
+    # 才執行（原本排在 run_masters 後面）——使用者要求把三鏡檢核／收斂
+    # 前互評／POV-HMW 也寫進 RAG，這些資料在原本的順序下 write_wisdom
+    # 執行當下根本還不存在（run_three_lens_check 是最後一個節點）。
+    # 移到最後一次寫，一次拿到全部資料，不用拆成兩次寫入。
+    g.add_edge("run_masters", "run_collective_scoring")
     g.add_edge("run_collective_scoring", "run_prototype_test")
     g.add_edge("run_prototype_test", "run_three_lens_check")
-    g.add_edge("run_three_lens_check", END)
+    g.add_edge("run_three_lens_check", "write_wisdom")
+    g.add_edge("write_wisdom", END)
     return g.compile(checkpointer=checkpointer)
 
 
@@ -2124,6 +2211,46 @@ def run_baseline(topic: str, company: str) -> dict:
     )
     emit_event("baseline", f"直接問 LLM《{proposal.get('title', '')}》", role="baseline")
     return proposal
+
+
+def generate_final_verdict(
+    *,
+    topic: str,
+    top_k_proposals: List[dict],
+    baseline_proposal: dict,
+    baseline_metrics: dict,
+    diversity_after: dict,
+) -> str:
+    """使用者要求：最後讓 AI 直接比較這場真實資料裡 agent 流程 vs baseline
+    的優劣，不是只有結構性的數字對照表——這段話要有觀點、具體點名兩邊的
+    優勢與代價，也要誠實承認 baseline 的價值（速度快、成本低），不是為了
+    捧 agent 流程而失真。"""
+    top_k_summaries = "\n".join(
+        f"- 《{p.get('title', '')}》{p.get('summary', '')}" for p in top_k_proposals
+    ) or "（無 top-K 提案）"
+    system = (
+        "你是一位產品策略顧問，要針對這場真實跑出來的資料，比較「多 agent 腦力激盪流程」"
+        "產出的 top-K 提案，跟「直接問 LLM 一次」的 baseline 提案，寫一段有觀點的優劣分析。"
+        "要具體點名兩邊各自的優勢與代價（不是空泛通則），並誠實承認 baseline 也有它的價值"
+        "（例如速度快、成本低、適合初步發散），不要為了捧多 agent 流程而失真。只輸出正文，"
+        "<=300字。"
+    )
+    user = (
+        f"主題：{topic}\n\n"
+        f"多 agent 流程 top-K 提案：\n{top_k_summaries}\n\n"
+        f"Baseline 提案：《{baseline_proposal.get('title', '')}》{baseline_proposal.get('summary', '')}\n\n"
+        f"量化對照：同儕互評後點子多樣性（兩兩平均距離）={diversity_after.get('avg_distance')}，"
+        f"baseline 真實搜尋引用數={baseline_metrics.get('real_citations')}（可能編造，無法驗證），"
+        f"baseline 成本=${baseline_metrics.get('cost_usd', 0):.4f}"
+    )
+    role_token = _event_role.set("verdict")
+    set_current_node("generate_final_verdict")
+    try:
+        verdict = call_llm(SMART_MODEL, system, user, max_tokens=900).strip()
+    finally:
+        _event_role.reset(role_token)
+    emit_event("generate_final_verdict", verdict[:80], role="verdict", extra={"verdict": verdict})
+    return verdict
 
 
 # ---------------------------------------------------------------------------
@@ -2194,6 +2321,7 @@ def save_outputs(
     baseline_metrics: dict,
     diversity_before: dict,
     diversity_after: dict,
+    final_verdict: str = "",
 ) -> Path:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -2205,6 +2333,11 @@ def save_outputs(
         "user_count": len(users),
         "personas": personas,
         "users": users,
+        # persona_results 本來就有完整 research_items（title/url/snippet）、
+        # research_brief、interview_transcript——之前算出來卻沒存，研究
+        # 足跡跟完整逐字稿存檔後就沒了。回放器/即時畫面要追溯「看了哪些
+        # 網頁才形成想法」就是靠這個欄位。
+        "persona_results": persona_results,
         "facilitator_log": facilitator_log,
         "human_qa_log": human_qa_log,
         "idea_pool_versions": idea_pool_versions,
@@ -2220,6 +2353,7 @@ def save_outputs(
         "diversity_before_review": diversity_before,
         "diversity_after_review": diversity_after,
         "baseline": {"proposal": baseline_proposal, "metrics": baseline_metrics},
+        "final_verdict": final_verdict,
         "total_cost_usd": round(total_cost(), 6),
     }
     path = OUTPUT_DIR / f"stage9-run-{stamp}.json"
@@ -2253,6 +2387,7 @@ def build_final_report_markdown(
     baseline_metrics: dict,
     diversity_before: dict,
     diversity_after: dict,
+    final_verdict: str = "",
 ) -> str:
     id_to_name = {p.get("id"): p.get("name") for p in personas}
     L: List[str] = []
@@ -2344,6 +2479,10 @@ def build_final_report_markdown(
     L.append("## 提案多樣性\n")
     L.append(f"- 同儕互評前：{diversity_before['avg_distance']}")
     L.append(f"- 同儕互評後：{diversity_after['avg_distance']}\n")
+
+    if final_verdict:
+        L.append("## AI 對照評語（agent 流程 vs baseline）\n")
+        L.append(f"{final_verdict}\n")
 
     return "\n".join(L)
 
@@ -2478,6 +2617,7 @@ def main() -> None:
             "persona_results": [],
             "next_presenter_id": None,
             "pending_question": None,
+            "pending_question_asked_by": None,
             "human_qa_log": [],
             "review_log": [],
             "idea_pool_versions": [],
@@ -2528,6 +2668,15 @@ def main() -> None:
     diversity_before = pairwise_diversity(before_proposals)
     diversity_after = pairwise_diversity(after_proposals)
 
+    print()
+    print("=== AI 對照評語：agent 流程 vs baseline ===")
+    top_k_proposals = [after_proposals_by_persona[pid] for pid in top_k_ids if pid in after_proposals_by_persona]
+    final_verdict = generate_final_verdict(
+        topic=topic, top_k_proposals=top_k_proposals, baseline_proposal=baseline_proposal,
+        baseline_metrics=baseline_metrics, diversity_after=diversity_after,
+    )
+    print(f"  {final_verdict}")
+
     out_path = save_outputs(
         round_id=round_id,
         topic=topic,
@@ -2550,6 +2699,7 @@ def main() -> None:
         baseline_metrics=baseline_metrics,
         diversity_before=diversity_before,
         diversity_after=diversity_after,
+        final_verdict=final_verdict,
     )
 
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
@@ -2570,6 +2720,7 @@ def main() -> None:
         baseline_metrics=baseline_metrics,
         diversity_before=diversity_before,
         diversity_after=diversity_after,
+        final_verdict=final_verdict,
     )
     report_path = REPORT_DIR / f"{round_id}-final-report.md"
     report_path.write_text(report_md, encoding="utf-8")

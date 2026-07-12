@@ -204,14 +204,26 @@ def cmd_resume(args: argparse.Namespace) -> None:
     user_input = (
         {"action": "skip"}
         if args.action == "skip"
-        else {"action": "ask", "question": args.question}
+        else {"action": "ask", "question": args.question, "asked_by": args.asked_by}
     )
 
     conn = sqlite3.connect(str(sg.CHECKPOINT_DB_PATH), check_same_thread=False)
     checkpointer = SqliteSaver(conn)
     graph = sg.build_parent_graph(checkpointer)
     config = {"configurable": {"thread_id": args.thread}}
-    graph.invoke(Command(resume=user_input), config)
+    try:
+        graph.invoke(Command(resume=user_input), config)
+    except Exception:  # noqa: BLE001 - 這次 invoke 本身可能跑到會議結束前的任何一個
+        # 節點（peer review／masters／write_wisdom…），不是只有「續跑到下一個
+        # interrupt」這麼單純。真實跑測踩過：這裡沒接住例外時，subprocess 會
+        # 直接帶著未寫入的 state.json 死掉——前端看到的還是上一次 pause 的
+        # 舊 payload，使用者以為還在等回應，其實 process 已經崩潰，再點一次
+        # 「跳過」或「提問」只會默默開新 subprocess 再撞同一個錯、白燒一次
+        # API 成本，UI 完全沒有任何錯誤訊息。跟 _run_main_and_capture 用同一招
+        # 接住例外寫進 state.json，讓前端至少看得到「error」狀態。
+        conn.close()
+        _write_state(run_dir, status="error", message=traceback.format_exc())
+        return
     conn.close()
 
     # 不管這次 resume 本身有沒有直接讓會議跑到底，都照樣呼叫 sg.main()——
@@ -239,6 +251,7 @@ def main() -> None:
     p_resume.add_argument("--thread", required=True)
     p_resume.add_argument("--action", choices=["ask", "skip"], required=True)
     p_resume.add_argument("--question", default=None)
+    p_resume.add_argument("--asked-by", default=None)
     p_resume.add_argument("--example-config", action="store_true")
     p_resume.set_defaults(func=cmd_resume)
 

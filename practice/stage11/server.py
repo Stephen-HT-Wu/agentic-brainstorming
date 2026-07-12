@@ -88,10 +88,15 @@ class CreateRunRequest(BaseModel):
 class ResumeRequest(BaseModel):
     action: str  # "ask" | "skip"
     question: Optional[str] = None
+    asked_by: Optional[str] = None
 
 
 class PersonasRequest(BaseModel):
     personas: list[dict]
+
+
+class UsersRequest(BaseModel):
+    users: list[dict]
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -100,6 +105,15 @@ def index():
     if not path.exists():
         return HTMLResponse("<h1>Stage 11</h1><p>static/index.html 還沒建立。</p>")
     return FileResponse(path)
+
+
+@app.get("/static/shared_renderers.js")
+def shared_renderers_js():
+    # 這份檔案的正本在 practice/stage10/（跟 build_replay.py 共用同一份
+    # 原始碼，不是複製過來的），這裡直接把內容原樣 serve 出去，不用另外
+    # mount 整個 stage10 目錄（那會連 build_replay.py 原始碼都曝露出去）。
+    return FileResponse(build_replay.__file__.replace("build_replay.py", "shared_renderers.js"),
+                         media_type="application/javascript")
 
 
 @app.get("/api/personas")
@@ -111,11 +125,24 @@ def get_personas():
 
 @app.get("/api/users")
 def get_users():
-    # 唯讀：使用者只要求「看得到被訪談者的人物設定」，沒要求在即時面板編輯
-    # 模擬用戶，所以不提供 PUT——跟 /api/personas 一樣走 dual-track fallback。
+    # 跟 /api/personas 一樣走 dual-track fallback。
     path = USERS_REAL if USERS_REAL.exists() else USERS_EXAMPLE
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     return {"users": data.get("users", []), "source": "real" if path == USERS_REAL else "example"}
+
+
+@app.put("/api/users")
+def put_users(body: UsersRequest):
+    # 使用者要求模擬用戶也能像 persona 一樣在開始前先編輯——跟
+    # put_personas 同款式，只寫真實檔，絕不動 .example. 檔。
+    for u in body.users:
+        if not u.get("id") or not u.get("name"):
+            raise HTTPException(400, "每個模擬用戶都要有 id 跟 name")
+    USERS_REAL.write_text(
+        yaml.safe_dump({"users": body.users}, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    return {"status": "saved", "count": len(body.users)}
 
 
 @app.put("/api/personas")
@@ -206,7 +233,7 @@ def resume_run(run_id: str, body: ResumeRequest):
     args = [sys.executable, str(WORKER_SCRIPT), "resume",
             "--run-dir", str(run_dir), "--thread", run_id, "--action", body.action]
     if body.action == "ask":
-        args += ["--question", body.question]
+        args += ["--question", body.question, "--asked-by", body.asked_by or "匿名"]
     if meta.get("example_config"):
         args.append("--example-config")
     log = (run_dir / "worker.log").open("a", encoding="utf-8")

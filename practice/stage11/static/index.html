@@ -18,7 +18,17 @@
     padding: 8px 16px; cursor: pointer; font-size: 0.9rem;
   }
   nav button.active { background: #5b7cff; color: white; border-color: #5b7cff; }
-  .wrap { max-width: 1200px; margin: 0 auto; padding: 24px; }
+  .wrap { max-width: 1600px; margin: 0 auto; padding: 24px; }
+
+  /* 使用者要求：點事件不用往下滑才看得到內容——左邊事件泳道，右邊
+     sticky 詳情欄，點了立刻在旁邊看到，不用捲頁面。窄螢幕疊回單欄。 */
+  .player-layout { display: flex; gap: 20px; align-items: flex-start; }
+  .player-main { flex: 1 1 56%; min-width: 0; }
+  .player-side { flex: 1 1 44%; min-width: 340px; position: sticky; top: 20px; align-self: flex-start; }
+  @media (max-width: 900px) {
+    .player-layout { flex-direction: column; }
+    .player-side { position: static; width: 100%; }
+  }
   .view { display: none; }
   .view.active { display: block; }
 
@@ -53,6 +63,11 @@
   .status-done { background: #3ed9c233; color: #3ed9c2; }
   .status-error { background: #ff6b9d33; color: #ff6b9d; }
 
+  .stat-row { display: flex; flex-wrap: wrap; gap: 16px; }
+  .stat-card { flex: 1 1 150px; background: #131a2c; border-radius: 12px; padding: 16px; text-align: center; }
+  .stat-card .num { font-size: 1.4rem; font-weight: 700; color: #8fb0ff; }
+  .stat-card .label { font-size: 0.8rem; color: #9aa5c0; margin-top: 4px; }
+
   .topo { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; background: #131a2c; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
   .topo-node {
     background: #0f1526; border: 1px solid #2a3557; border-radius: 8px; padding: 6px 10px;
@@ -78,7 +93,10 @@
   .chip:hover { border-color: #5b7cff; }
   .chip.selected { background: #1b2540; border-color: #5b7cff; color: #8fb0ff; }
 
-  .detail-panel { background: #0f1526; border-radius: 12px; padding: 16px; margin-top: 16px; min-height: 80px; max-height: 480px; overflow-y: auto; }
+  .detail-panel { background: #0f1526; border-radius: 12px; padding: 16px; min-height: 80px; max-height: calc(100vh - 40px); overflow-y: auto; }
+  /* stage11 的 #lanes 原本沒有高度限制，事件一多會無限長高，讓右邊 sticky
+     詳情欄失去意義（左欄比視窗還高，sticky 就跟一般排版沒兩樣）。 */
+  #lanesCard { max-height: calc(100vh - 40px); overflow-y: auto; }
   .detail-panel .role { font-weight: 700; margin-bottom: 6px; }
   .detail-panel .summary-line { color: #c4cbe0; margin-bottom: 4px; }
   .detail-panel pre { white-space: pre-wrap; word-break: break-word; font-family: inherit; margin: 8px 0 0; font-size: 0.85rem; color: #a8b2cc; }
@@ -139,6 +157,17 @@
       </div>
       <div id="personaList"></div>
     </div>
+
+    <div class="card">
+      <div class="row" style="justify-content:space-between;margin-bottom:14px;">
+        <div style="font-weight:700;">模擬用戶（被訪談者）設定<span id="userSource" style="font-size:0.78rem;color:#6b7590;margin-left:8px;"></span></div>
+        <div class="row">
+          <button class="secondary" id="btnAddUser">+ 新增模擬用戶</button>
+          <button class="primary" id="btnSaveUsers">儲存模擬用戶</button>
+        </div>
+      </div>
+      <div id="userList"></div>
+    </div>
   </div>
 
   <div class="view" id="view-live">
@@ -150,10 +179,21 @@
       <span id="liveStatusBadge" class="status-badge status-running">running</span>
     </div>
 
+    <div class="stat-row" style="margin-bottom:16px;">
+      <div class="stat-card"><div class="num" id="statStepCost">$0.0000</div><div class="label">這一步成本</div></div>
+      <div class="stat-card"><div class="num" id="statTotalCost">$0.0000</div><div class="label">累計成本</div></div>
+      <div class="stat-card"><div class="num" id="statStepTime">0s</div><div class="label">這一步耗時</div></div>
+      <div class="stat-card"><div class="num" id="statTotalTime">0s</div><div class="label">累計耗時（不含等待人類）</div></div>
+    </div>
+
     <div class="topo" id="topo"></div>
 
     <div class="hitl-panel" id="hitlPanel" style="display:none;">
       <h3>⏸ 人類介入點</h3>
+      <div class="row" style="margin-bottom:10px;">
+        <label style="margin:0;white-space:nowrap;">你的名稱</label>
+        <input type="text" id="hitlDisplayName" placeholder="匿名" style="max-width:200px;margin-bottom:0;">
+      </div>
       <div id="hitlPresenter"></div>
       <div id="hitlProposal" style="margin:8px 0;color:#c4cbe0;font-size:0.9rem;"></div>
       <div id="hitlFacilitatorReason" style="display:none;margin:8px 0;padding:8px 12px;background:#1b1420;border-left:3px solid #ffb45455;border-radius:4px;font-size:0.85rem;color:#c4a86e;"></div>
@@ -165,13 +205,18 @@
       </div>
     </div>
 
-    <div class="card" id="lanesCard">
-      <div id="lanes"></div>
-      <div id="lanesEmpty" class="empty-hint">還沒有事件——開始一場會議後這裡會即時顯示每個角色的平行進度</div>
-    </div>
-
-    <div class="detail-panel" id="detailPanel">
-      <div class="role">點一個事件方塊看完整內容</div>
+    <div class="player-layout">
+      <div class="player-main">
+        <div class="card" id="lanesCard">
+          <div id="lanes"></div>
+          <div id="lanesEmpty" class="empty-hint">還沒有事件——開始一場會議後這裡會即時顯示每個角色的平行進度</div>
+        </div>
+      </div>
+      <div class="player-side">
+        <div class="detail-panel" id="detailPanel">
+          <div class="role">點一個事件方塊看完整內容</div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -187,139 +232,8 @@
 
 </div>
 
+<script src="/static/shared_renderers.js"></script>
 <script>
-// ---------- 共用小工具 ----------
-function escapeHtml(s) {
-  // 不能用「d.innerText = s; return d.innerHTML」這招——實測踩到：
-  // persona 的 background 是多行文字（YAML `>` 折疊出來的段落），Chromium
-  // 幫 innerText 塞值時會把字串裡的換行字元轉成真的 <br> 節點，讀回
-  // innerHTML 時這些 <br> 就變成輸出字串的一部分。這段文字後面會被塞進
-  // <textarea> 的 value——textarea 顯示的是原始文字，不會解析 HTML，於是
-  // 使用者看到的是字面上的「<br>」字樣，不是換行。改成純字串取代，不碰
-  // DOM，換行字元原封不動保留。
-  return String(s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-function esc(s) { return escapeHtml(s === undefined || s === null ? '' : String(s)); }
-function ul(items) {
-  if (!items || !items.length) return '';
-  return '<ul class="detail-list">' + items.map(i => `<li>${esc(typeof i === 'object' ? (i.id ? i.id + '：' : '') + (i.text || JSON.stringify(i)) : i)}</li>`).join('') + '</ul>';
-}
-function kv(label, value) {
-  if (value === undefined || value === null || value === '') return '';
-  return `<div class="kv"><span class="k">${esc(label)}</span><span class="v">${esc(value)}</span></div>`;
-}
-function block(title, html) {
-  if (!html) return '';
-  return `<div class="detail-block"><div class="detail-block-title">${esc(title)}</div>${html}</div>`;
-}
-// 使用者反應：互評/評分/收斂等事件的 extra 裡到處混著英文 persona_id
-// （例如 target_persona_id="alex"）跟中文姓名（role="persona:陳建宏"），
-// 認人很累。統一解析成姓名——找不到就照原樣顯示。
-function personaName(idOrName) {
-  if (!idOrName) return idOrName;
-  const hit = runPersonas.find(p => p.id === idOrName);
-  return hit ? hit.name : idOrName;
-}
-
-function renderUserProfile(user) {
-  if (!user) return '';
-  let html = '';
-  if (user.age !== undefined && user.age !== null) html += kv('年齡', user.age);
-  html += block('情境', user.context ? `<p>${esc(user.context)}</p>` : '');
-  html += block('痛點', ul(user.pain_points));
-  html += kv('說話口吻', user.tone);
-  return html;
-}
-
-const BMC_ORDER = ["客群","價值主張","通路","顧客關係","收益流","關鍵資源","關鍵活動","關鍵夥伴","成本結構"];
-function renderBmc(bmc) {
-  if (!bmc) return '';
-  let html = '<div class="bmc-grid">';
-  for (const k of BMC_ORDER) { if (bmc[k]) html += `<div class="bmc-cell"><div class="bmc-key">${esc(k)}</div><div class="bmc-val">${esc(bmc[k])}</div></div>`; }
-  html += '</div>';
-  return html;
-}
-function renderSources(sources) {
-  if (!sources || !sources.length) return '';
-  return '<ul class="detail-list">' + sources.map(s =>
-    `<li><a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.title || s.url)}</a>${s.how_used ? ' — ' + esc(s.how_used) : ''}</li>`
-  ).join('') + '</ul>';
-}
-function renderProposal(p, note) {
-  if (!p) return '';
-  let html = '';
-  if (note) html += `<div class="detail-note">${esc(note)}</div>`;
-  if (p.title) html += `<div class="detail-proposal-title">${esc(p.title)}</div>`;
-  if (p.summary) html += `<p>${esc(p.summary)}</p>`;
-  html += block('POV', p.pov ? `<p>${esc(p.pov)}</p>` : '');
-  html += block('HMW', p.hmw ? `<p>${esc(p.hmw)}</p>` : '');
-  html += block('HMW 回應', p.hmw_response ? `<p>${esc(p.hmw_response)}</p>` : '');
-  html += kv('自評分數', p.self_score !== undefined ? p.self_score + (p.score_reason ? '：' + p.score_reason : '') : '');
-  html += block('修正說明', p.revision_note ? `<p>${esc(p.revision_note)}</p>` : '');
-  html += block('Business Model Canvas', renderBmc(p.bmc));
-  html += block('真實搜尋依據', renderSources(p.sources));
-  html += kv('引用洞見', (p.insight_refs || []).join(', '));
-  html += kv('引用跨場記憶', (p.memory_refs || []).join(', '));
-  return html;
-}
-function renderPrototype(proto) {
-  if (!proto) return '';
-  const lp = proto.landing_page || {};
-  let html = '';
-  if (lp.headline) html += `<div class="detail-proposal-title">${esc(lp.headline)}</div>`;
-  if (lp.subheadline) html += `<p>${esc(lp.subheadline)}</p>`;
-  html += block('概念一頁書', lp.concept_one_pager ? `<p>${esc(lp.concept_one_pager)}</p>` : '');
-  html += block('功能', ul((lp.features || []).map(f => `${f.title}：${f.desc}`)));
-  html += block('測試後修改內容', proto.diff_text ? `<pre>${esc(proto.diff_text)}</pre>` : '');
-  if (proto.reactions && proto.reactions.length) html += block('模擬用戶反應', proto.reactions.map(r => {
-    const profile = renderUserProfile(runUsers.find(u => u.id === r.user_id || u.name === r.user_name));
-    return `<div class="quote"><b>${esc(r.user_name)}：</b>${esc(r.reaction)}</div>` + (profile ? `<div class="detail-note">${esc(r.user_name)} 的人物設定</div>${profile}` : '');
-  }).join(''));
-  html += kv('原型檔案', proto.html_path);
-  return html;
-}
-function renderExtraGeneric(action, extra) {
-  if (!extra) {
-    if (action === 'present' || action === 'baseline') return '<div class="detail-note">完整提案內容會在會議跑完後的回放頁顯示（/api/runs/&lt;id&gt;/replay）。</div>';
-    return '';
-  }
-  switch (action) {
-    case 'collect': return block('搜尋查詢', ul(extra.queries)) + kv('原始結果數', extra.n_results);
-    case 'recall_memory': return block('命中的跨場記憶', (extra.hits || []).map(h =>
-        `<div class="quote"><b>[${esc(h.topic || h.collection || '')}${h.round_id ? ' · ' + h.round_id : ''}]</b>${h.distance != null ? ' (distance ' + h.distance.toFixed(3) + ')' : ''}<br>${esc(h.text)}</div>`).join(''));
-    case 'design_interview_guide': return block('訪綱', ul(extra.questions));
-    case 'interview_turn': return `<div class="quote"><b>問（第 ${esc(extra.round)} 輪 · 對象：${esc(extra.user_name)}）：</b>${esc(extra.question)}</div><div class="quote"><b>答：</b>${esc(extra.answer)}</div>` +
-      block('被訪談者的人物設定', renderUserProfile(runUsers.find(u => u.id === extra.user_id)));
-    case 'extract_insights': return block('萃取洞見', ul(extra.insights));
-    case 'write_pov_hmw': return block('POV', `<p>${esc(extra.pov)}</p>`) + block('HMW', `<p>${esc(extra.hmw)}</p>`);
-    case 'draft_proposal': return (extra.bmc_missing && extra.bmc_missing.length) ? block('BMC 缺漏欄位', ul(extra.bmc_missing)) : '<div class="detail-note">BMC 九宮格已通過完整性檢查（完整內容可在該 persona 的「發表」事件查看，或等會議跑完看回放頁）</div>';
-    case 'refine': return kv('修正輪次', extra.round) + kv('embedding 位移', extra.embedding_distance) + kv('自評分數變化', `${extra.self_score_before} → ${extra.self_score_after}（Δ${extra.self_score_delta > 0 ? '+' : ''}${extra.self_score_delta}）`);
-    case 'homework_done': return kv('耗時', extra.elapsed_s ? extra.elapsed_s.toFixed(1) + ' 秒' : '');
-    case 'facilitator_decide': return kv('第幾輪', extra.round) + kv('動作', extra.action) + kv('指定人選', extra.chosen_persona_name) + block('理由', extra.reason ? `<p>${esc(extra.reason)}</p>` : '') + kv('已用預算', extra.budget_used_usd != null ? '$' + extra.budget_used_usd.toFixed(4) : '');
-    case 'give_feedback': return kv('是否回應了 HMW', extra.hmw_addressed === true ? '是' : (extra.hmw_addressed === false ? '否' : '')) + block('理由', extra.hmw_addressed_reason ? `<p>${esc(extra.hmw_addressed_reason)}</p>` : '') + block('✅ 認同', ul(extra.agreements)) + block('❌ 異議', ul(extra.disagreements)) + block('💡 洞見', ul(extra.insights));
-    case 'revise_after_feedback': return kv('回應的評論者', (extra.addressed_reviewer_ids || []).map(personaName).join(', '));
-    case 'master_critique': return kv('評論視角', extra.angle) + block('點評內容', extra.critique ? `<p>${esc(extra.critique)}</p>` : '') + kv('最看好', personaName(extra.top_pick_persona));
-    case 'write_wisdom': return kv('寫入集體智慧筆數', extra.wisdom_written) + kv('寫入訪談逐字稿筆數', extra.interviews_written);
-    case 'score_proposal': return kv('評分者', extra.rater_name) + kv('對象', personaName(extra.target_persona_id)) + kv('分數', extra.score) + block('理由', extra.reason ? `<p>${esc(extra.reason)}</p>` : '');
-    case 'run_collective_scoring': return block('Top-K 入選', ul((extra.top_k_ids || []).map(personaName))) + block('各人平均分／標準差', ul(Object.entries(extra.aggregates || {}).map(([k, v]) => `${personaName(k)}：平均 ${v.mean}，標準差 ${v.stdev}（n=${v.n}）`)));
-    case 'test_prototype': return block('模擬用戶反應', extra.reaction ? `<div class="quote">${esc(extra.reaction)}</div>` : '') +
-      block('被訪談者的人物設定', renderUserProfile(runUsers.find(u => u.id === extra.user_id)));
-    case 'refine_after_test': return kv('embedding 位移', extra.embedding_distance);
-    case 'three_lens_check': return block('👍 正面', ul(extra.positive)) + block('👎 負面', ul(extra.negative)) + block('💡 洞見', ul(extra.insight));
-    default: return '<pre>' + escapeHtml(JSON.stringify(extra, null, 2)) + '</pre>';
-  }
-}
-function renderDetail(e) {
-  if (e.detail && e.detail.kind === 'proposal') return renderProposal(e.detail.proposal, e.detail.note);
-  if (e.detail && e.detail.kind === 'prototype') return renderPrototype(e.detail.prototype);
-  return renderExtraGeneric(e.action, e.extra);
-}
-
 // ---------- 頭像（本地決定性產生，不打任何 API）----------
 function hashCode(s) {
   let h = 0;
@@ -360,14 +274,17 @@ function switchView(name) {
   if (name === 'history') loadHistory();
 }
 
-// ---------- 設定畫面：persona 編輯 ----------
+// ---------- 設定畫面：persona／模擬用戶編輯 ----------
 let personas = [];
-let users = [];  // 唯讀，只用來在事件細節裡解析「被訪談者的人物設定」
+let users = [];  // 設定畫面用的可編輯清單——跟事件細節解析用的全域 USERS
+                 // 是分開的（那個是「這場 run 實際用的」快照，見 loadRunConfig()）
 
 async function loadUsers() {
   const res = await fetch('/api/users');
   const data = await res.json();
   users = data.users;
+  document.getElementById('userSource').textContent = data.source === 'real' ? '（讀取真實設定 users.yaml）' : '（目前是範例設定 users.example.yaml，儲存後會建立你自己的 users.yaml）';
+  renderUserList();
 }
 
 function personaCardHtml(p, idx) {
@@ -395,7 +312,12 @@ function renderPersonaList() {
 }
 
 function collectPersonaFormsIntoState() {
-  document.querySelectorAll('.persona-card').forEach(card => {
+  // 一定要限定在 #personaList 底下——使用者要求的模擬用戶編輯器複用了
+  // 同一個 .persona-card CSS class（純粹共用樣式），如果不加這個範圍限制，
+  // 這個查詢會連使用者卡片也一起選到，把 users[idx] 的欄位寫進
+  // personas[idx]，資料會整個錯亂（實測踩到，靠 code review 抓到，不是
+  // 猜測）。
+  document.querySelectorAll('#personaList .persona-card').forEach(card => {
     const idx = parseInt(card.dataset.idx);
     const p = personas[idx];
     card.querySelectorAll('[data-field]').forEach(el => {
@@ -435,6 +357,68 @@ async function loadPersonas() {
   document.getElementById('personaSource').textContent = data.source === 'real' ? '（讀取真實設定 personas.yaml）' : '（目前是範例設定 personas.example.yaml，儲存後會建立你自己的 personas.yaml）';
   renderPersonaList();
 }
+
+// 使用者要求「訪談者也可以像 persona 一樣在開始前做設定」——跟 persona
+// 編輯器同款式，欄位換成 users.yaml 的形狀（id/name/age/context/
+// pain_points/tone），age 是數字、pain_points 比照 focus 用換行分陣列。
+function userCardHtml(u, idx) {
+  return `
+  <div class="persona-card" data-idx="${idx}">
+    <div class="persona-card-head">
+      ${avatarHtml(u.id, u.name, 'sm')}
+      <div style="flex:1"></div>
+      <button class="danger" onclick="removeUser(${idx})">移除</button>
+    </div>
+    <div class="persona-grid">
+      <div><label>id</label><input type="text" data-field="id" value="${esc(u.id || '')}"></div>
+      <div><label>姓名</label><input type="text" data-field="name" value="${esc(u.name || '')}"></div>
+      <div><label>年齡</label><input type="text" data-field="age" value="${esc(u.age !== undefined && u.age !== null ? u.age : '')}"></div>
+      <div class="full"><label>情境</label><textarea data-field="context">${esc(u.context || '')}</textarea></div>
+      <div class="full"><label>痛點（每行一項）</label><textarea data-field="pain_points">${esc((u.pain_points || []).join('\n'))}</textarea></div>
+      <div class="full"><label>說話口吻</label><input type="text" data-field="tone" value="${esc(u.tone || '')}"></div>
+    </div>
+  </div>`;
+}
+
+function renderUserList() {
+  document.getElementById('userList').innerHTML = users.map((u, i) => userCardHtml(u, i)).join('')
+    || '<div class="empty-hint">還沒有模擬用戶，按上面「新增模擬用戶」開始設定</div>';
+}
+
+function collectUserFormsIntoState() {
+  document.querySelectorAll('#userList .persona-card').forEach(card => {
+    const idx = parseInt(card.dataset.idx);
+    const u = users[idx];
+    card.querySelectorAll('[data-field]').forEach(el => {
+      const field = el.dataset.field;
+      if (field === 'pain_points') u[field] = el.value.split('\n').map(s => s.trim()).filter(Boolean);
+      else if (field === 'age') u[field] = el.value.trim() ? Number(el.value.trim()) : null;
+      else u[field] = el.value;
+    });
+  });
+}
+
+window.removeUser = function (idx) {
+  collectUserFormsIntoState();
+  users.splice(idx, 1);
+  renderUserList();
+};
+
+document.getElementById('btnAddUser').addEventListener('click', () => {
+  collectUserFormsIntoState();
+  users.push({ id: '', name: '', age: null, context: '', pain_points: [], tone: '' });
+  renderUserList();
+});
+
+document.getElementById('btnSaveUsers').addEventListener('click', async () => {
+  collectUserFormsIntoState();
+  const res = await fetch('/api/users', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ users }),
+  });
+  if (res.ok) { alert('模擬用戶已儲存'); loadUsers(); }
+  else { const err = await res.json(); alert('儲存失敗：' + (err.detail || res.status)); }
+});
 
 document.getElementById('btnStartRun').addEventListener('click', async () => {
   const topic = document.getElementById('topicInput').value.trim();
@@ -503,14 +487,28 @@ let selectedEventIdx = null;
 //又被改掉，或者這場是 --example-config 但使用者真實設定檔存在，兩者對
 //不起來。事件細節裡解析 persona_id／user_id 一律要用這兩個，不能用
 // 設定畫面那兩個全域變數。
-let runPersonas = [];
-let runUsers = [];
+let PERSONAS = [];
+let USERS = [];
 
 async function loadRunConfig(runId) {
-  const res = await fetch(`/api/runs/${runId}/config`);
-  const data = await res.json();
-  runPersonas = data.personas || [];
-  runUsers = data.users || [];
+  // worker subprocess 剛 spawn 時，config_snapshot.json 還沒寫出來（python
+  // 啟動 + import graph.py 有 import chromadb 之類的重量開銷，實測會有
+  // 一段空窗）——這裡撞到的話後端 /config 會回傳預設的空陣列，若只 fetch
+  // 一次、不重試，PERSONAS/USERS 會整場會議都是空的，泳道角色標籤/受訪者
+  // 人物設定全部退回「系統」這種 fallback，看不出真正身份。重試到拿到
+  // 非空資料為止（或放棄，回退到空陣列，此時退回舊有 fallback 顯示）。
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const res = await fetch(`/api/runs/${runId}/config`);
+    const data = await res.json();
+    if ((data.personas && data.personas.length) || (data.users && data.users.length)) {
+      PERSONAS = data.personas || [];
+      USERS = data.users || [];
+      return;
+    }
+    if (attempt < 7) await new Promise(r => setTimeout(r, 400));
+  }
+  PERSONAS = [];
+  USERS = [];
 }
 
 function laneOrder(role) {
@@ -536,7 +534,7 @@ function renderLanes() {
     const idxs = byRole[role];
     const color = roleColor(role);
     const name = roleDisplayName(role);
-    const personaMeta = runPersonas.find(p => p.name === name);
+    const personaMeta = PERSONAS.find(p => p.name === name);
     const roleLabel = personaMeta ? personaMeta.role : (role.startsWith('master:') ? '大師' : (role === 'facilitator' ? '主持人' : (role === 'baseline' ? 'Baseline 對照組' : '系統')));
     const avatar = avatarHtml(personaMeta ? personaMeta.id : role, name);
     const chips = idxs.map(idx => {
@@ -569,7 +567,9 @@ function setStatusBadge(status) {
 
 function showHitl(payload) {
   document.getElementById('hitlPanel').style.display = 'block';
-  const presonaMeta = runPersonas.find(p => p.id === payload.presenter_id);
+  const nameInput = document.getElementById('hitlDisplayName');
+  if (!nameInput.value) nameInput.value = localStorage.getItem('hitlDisplayName') || '';
+  const presonaMeta = PERSONAS.find(p => p.id === payload.presenter_id);
   document.getElementById('hitlPresenter').innerHTML = `${avatarHtml(payload.presenter_id, payload.presenter_name, 'sm')} <b>${esc(payload.presenter_name)}</b>${presonaMeta ? '（' + esc(presonaMeta.role) + '）' : ''}`;
   document.getElementById('hitlProposal').innerHTML = `《${esc(payload.proposal_title)}》<br>${esc(payload.proposal_summary || '')}`;
   const reasonEl = document.getElementById('hitlFacilitatorReason');
@@ -588,7 +588,14 @@ async function resumeRun(action, question) {
   hideHitl();
   setStatusBadge('running');
   const body = { action };
-  if (question) body.question = question;
+  if (question) {
+    body.question = question;
+    // 不做真的身份驗證，只是讓 human_qa_log 知道「誰問的」——存在
+    // localStorage，下次開面板還記得上次填過的名字。
+    const name = document.getElementById('hitlDisplayName').value.trim();
+    if (name) localStorage.setItem('hitlDisplayName', name);
+    body.asked_by = name || null;
+  }
   const res = await fetch(`/api/runs/${currentRunId}/resume`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   });
@@ -606,8 +613,8 @@ async function openLiveRun(runId, topic) {
   currentRunId = runId;
   currentEvents = [];
   selectedEventIdx = null;
-  runPersonas = [];
-  runUsers = [];
+  PERSONAS = [];
+  USERS = [];
   document.getElementById('liveTopic').textContent = topic || runId;
   document.getElementById('liveRunId').textContent = runId;
   document.getElementById('detailPanel').innerHTML = '<div class="role">點一個事件方塊看完整內容</div>';
@@ -616,16 +623,57 @@ async function openLiveRun(runId, topic) {
   reconnectEvents();
 }
 
+// 使用者要求即時畫面也要看得到每個環節的 token cost 以及累計 cost，還有
+// human-in-the-loop 之外各環節的耗時跟累計耗時——「不含 HITL 等待」是關鍵：
+// facilitator_decide 到下一筆 human_qa（有提問）或 present（跳過）之間的
+// 間隔是真人在想要不要問問題，不是 agent 在跑，這段真實時間不算進
+// 「agent 實際花的時間」。
+let totalElapsedMs = 0;
+let lastEvent = null;
+
+function isHitlWaitGap(prev, cur) {
+  return !!prev && prev.role === 'facilitator' && prev.action === 'facilitator_decide' &&
+    (cur.action === 'human_qa' || cur.action === 'present');
+}
+
+function fmtSeconds(ms) {
+  if (ms < 1000) return Math.round(ms) + 'ms';
+  return (ms / 1000).toFixed(1) + 's';
+}
+
+function updateStats(e) {
+  const costBefore = sumDisplayCost(currentEvents.slice(0, -1));
+  const costNow = sumDisplayCost(currentEvents);
+  document.getElementById('statStepCost').textContent = '$' + (costNow - costBefore).toFixed(4);
+  document.getElementById('statTotalCost').textContent = '$' + costNow.toFixed(4);
+
+  const curMs = new Date(e.ts).getTime();
+  let stepMs = 0;
+  if (lastEvent) {
+    const prevMs = new Date(lastEvent.ts).getTime();
+    stepMs = curMs - prevMs;
+    if (!isHitlWaitGap(lastEvent, e)) totalElapsedMs += stepMs;
+  }
+  lastEvent = e;
+  document.getElementById('statStepTime').textContent = fmtSeconds(stepMs);
+  document.getElementById('statTotalTime').textContent = fmtSeconds(totalElapsedMs);
+}
+
 function reconnectEvents() {
   if (currentEventSource) currentEventSource.close();
   currentEvents = [];
   Object.keys(nodeLastSeen).forEach(k => delete nodeLastSeen[k]);
+  totalElapsedMs = 0;
+  lastEvent = null;
+  ['statStepCost', 'statTotalCost'].forEach(id => document.getElementById(id).textContent = '$0.0000');
+  ['statStepTime', 'statTotalTime'].forEach(id => document.getElementById(id).textContent = '0s');
   renderLanes();
   const es = new EventSource(`/api/runs/${currentRunId}/events`);
   currentEventSource = es;
   es.onmessage = (ev) => {
     const e = JSON.parse(ev.data);
     currentEvents.push(e);
+    updateStats(e);
     const sup = e.node && supervisorNodeFor(e.node);
     if (sup) nodeLastSeen[sup] = Date.now();
     renderLanes();
