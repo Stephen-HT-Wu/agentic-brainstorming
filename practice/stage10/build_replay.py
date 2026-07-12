@@ -62,8 +62,24 @@ def compute_comparison(run_data: dict) -> dict:
 
     agent_source_counts = [len(p.get("sources") or []) for p in agent_proposals]
     agent_bmc_filled = [_bmc_filled_count(p.get("bmc") or {}) for p in agent_proposals]
-    revision_count = len(idea_pool_versions) + len(run_data.get("prototypes") or [])
+    co_creation_log = run_data.get("co_creation_log") or []
+    revision_count = len(idea_pool_versions) + len(co_creation_log) + len(run_data.get("prototypes") or [])
     memory_refs_total = sum(len(p.get("memory_refs") or []) for p in agent_proposals)
+
+    # 使用者要求把「點子多樣性」（衡量多個最終提案彼此差異度，選拔框架下
+    # 才有意義）換成「整合的跨領域觀點數」——現在只有一個共創提案，量
+    # 「有多少不同人」而非「有多不同」。種子 persona（提供草稿起點、沒有
+    # 自己的 co_creation_log 條目）算 1 位真實整合；其餘編輯者只有在真的
+    # 被某一輪 built_on_persona_ids 點名過，才算整合進最終提案——單純
+    # 「有沒有輪到編輯」不算數，那樣這個數字永遠等於總人數，量不出真假。
+    all_persona_ids = {p.get("id") for p in (run_data.get("personas") or [])}
+    editor_ids = {turn.get("persona_id") for turn in co_creation_log if turn.get("persona_id")}
+    seed_ids = all_persona_ids - editor_ids
+    built_on_union: set = set()
+    for turn in co_creation_log:
+        built_on_union.update(turn.get("built_on_persona_ids") or [])
+    integrated_persona_count = len(seed_ids | built_on_union)
+    total_persona_count = len(all_persona_ids) or 1
 
     return {
         "topic": run_data.get("topic"),
@@ -77,9 +93,9 @@ def compute_comparison(run_data: dict) -> dict:
             "baseline": f"{_bmc_filled_count(baseline_proposal.get('bmc') or {})}/9",
             "agent_all": f"{min(agent_bmc_filled) if agent_bmc_filled else 0}/9 ~ {max(agent_bmc_filled) if agent_bmc_filled else 0}/9",
         },
-        "diversity": {
-            "baseline": "N/A（只有一個答案，無法量測多樣性）",
-            "agent": run_data.get("diversity_after_review", {}).get("avg_distance"),
+        "cross_domain_integration": {
+            "baseline": "N/A（只有一人單獨生成，無跨領域整合）",
+            "agent": f"整合 {integrated_persona_count}/{total_persona_count} 位不同領域專家的觀點",
         },
         "revision_count": {
             "baseline": 0,
@@ -374,7 +390,7 @@ function renderCompareTable() {
   const rows = [
     ["真實搜尋依據", `${c.real_sources.baseline} 筆（模型可能編造，無法驗證）`, `平均 ${c.real_sources.agent_avg} 筆／份，來自真實搜尋結果`],
     ["BMC 完整度", c.bmc_completeness.baseline, c.bmc_completeness.agent_all + "（每份皆通過結構驗證）"],
-    ["點子多樣性", c.diversity.baseline, `兩兩平均距離 ${c.diversity.agent}（真的是 ${c.cost.agent_persona_count} 份不同觀點）`],
+    ["整合的跨領域觀點數", c.cross_domain_integration.baseline, c.cross_domain_integration.agent],
     ["被批判／測試後改良次數", `${c.revision_count.baseline}（從未被挑戰）`, `${c.revision_count.agent} 次（同儕互評 + 用戶測試雙重驅動）`],
     ["跨場記憶引用", `${c.cross_round_memory.baseline}（無記憶，每次都是新對話）`, `${c.cross_round_memory.agent_actually_cited} 筆真實引用（命中 ${c.cross_round_memory.agent_recall_hits} 次）`],
     ["成本", `$${Number(c.cost.baseline).toFixed(4)}（一次呼叫）`, `$${Number(c.cost.agent_total).toFixed(4)}（完整流程：${c.cost.agent_persona_count} 位 persona + 大師 + 訪談 + 測試）`],

@@ -103,8 +103,6 @@ MAX_BUDGET_USD = 5.0
 RECALL_N_RESULTS = 3
 RECALL_MAX_DISTANCE = 1.0
 
-TOP_K = 3  # 進入 Prototype/Test 階段的提案數上限
-
 MASTERS = [
     {"id": "tech_master", "name": "技術大師", "angle": "技術可行性、架構與資料風險、能不能規模化執行"},
     {"id": "biz_master", "name": "商業大師", "angle": "商業模式健全度、單位經濟（誰付錢、成本結構撐不撐得住）"},
@@ -1220,6 +1218,8 @@ def write_collective_wisdom(
     idea_pool_versions: List[dict],
     persona_results: List[dict],
     three_lens_checks: List[dict],
+    co_created_proposal: dict,
+    co_creation_log: List[dict],
 ) -> dict:
     # 使用者要求把各環節的 insight 也寫進 RAG，日後能重用——之前只寫
     # 大師點評跟最終提案標題摘要跟訪談洞見，POV/HMW、同儕互評內容、三鏡
@@ -1298,6 +1298,29 @@ def write_collective_wisdom(
         })
         ids.append(f"{round_id}-threelens-{c.get('persona_id')}-{c.get('target_persona_id')}")
 
+    # 使用者要求把「全員互評選 Top-K」改成「共創收斂成一個提案」——
+    # 新增這個最終共創提案本身，跟每一輪誰改了什麼的共創歷程，都是
+    # 這次改動新產生、原本沒有的資料，值得寫進 RAG 供未來會議重用。
+    if co_created_proposal:
+        docs.append(f"《{co_created_proposal.get('title', '')}》{co_created_proposal.get('summary', '')}")
+        metas.append({
+            "round_id": round_id, "topic": topic, "doc_type": "co_created_proposal",
+            "created_at": now,
+        })
+        ids.append(f"{round_id}-co-created-proposal")
+
+    for turn in co_creation_log:
+        built_on = "、".join(turn.get("built_on_persona_ids") or [])
+        docs.append(
+            f"{turn.get('persona_name')} 的共創編輯（第 {turn.get('turn')} 輪）："
+            f"{turn.get('contribution_note', '')}｜整合了：{built_on or '（無）'}"
+        )
+        metas.append({
+            "round_id": round_id, "topic": topic, "doc_type": "co_creation_turn",
+            "persona": turn.get("persona_name"), "created_at": now,
+        })
+        ids.append(f"{round_id}-co-creation-turn-{turn.get('turn')}")
+
     if docs:
         wisdom_col.add(documents=docs, metadatas=metas, ids=ids)
 
@@ -1325,111 +1348,6 @@ def write_collective_wisdom(
 
     return {"wisdom_written": len(docs), "interviews_written": len(idocs)}
 
-
-# ---------------------------------------------------------------------------
-# 集體評分子圖（新，stage8 核心之一）
-# ---------------------------------------------------------------------------
-
-class ScoringTask(TypedDict):
-    rater: dict
-    target_persona_id: str
-    target_persona_name: str
-    proposal: dict
-
-
-class ScoringPanelState(TypedDict):
-    personas: List[dict]
-    final_proposals: dict  # persona_id -> proposal
-    scores: Annotated[List[dict], operator.add]
-
-
-def fan_out_scoring(state: ScoringPanelState) -> List[Send]:
-    """N 位 persona 交叉評分彼此的最終提案——不評自己的，這是『多 agent
-    判斷聚合』的核心：最後的排名不是任何單一 agent（包括 Facilitator／
-    大師）說了算，是全體評分平均出來的。"""
-    id_to_name = {p.get("id"): p.get("name") for p in state["personas"]}
-    sends = []
-    for rater in state["personas"]:
-        for pid, proposal in state["final_proposals"].items():
-            if pid == rater.get("id"):
-                continue
-            sends.append(Send("score_proposal", {
-                "rater": rater, "target_persona_id": pid,
-                "target_persona_name": id_to_name.get(pid, pid), "proposal": proposal,
-            }))
-    return sends
-
-
-def score_proposal(task: ScoringTask) -> dict:
-    rater = task["rater"]
-    proposal = task["proposal"]
-    role_token = _event_role.set(_persona_label(rater))
-    system = (
-        f"你是 {rater['name']}（{rater.get('role', '')}）。針對這個提案給 1-10 分的整體評分"
-        "（可行性、影響力、跟公司定位契合度綜合考量，不用手軟）。"
-        "只輸出 JSON：{\"score\": 數字, \"reason\": \"<=40字\"}"
-    )
-    user = (
-        f"標題：{proposal.get('title')}\n摘要：{proposal.get('summary')}\n"
-        f"BMC：{json.dumps(proposal.get('bmc'), ensure_ascii=False)}"
-    )
-    try:
-        raw = call_llm(CHEAP_MODEL, system, user, max_tokens=400)
-        data = extract_json_object(raw)
-    finally:
-        _event_role.reset(role_token)
-    try:
-        score = float(data.get("score"))
-        score = max(1.0, min(10.0, score))
-    except (TypeError, ValueError):
-        score = 5.0  # 保底中位數，解析失敗不能讓平均分被污染成 0
-    reason = _safe_str(data.get("reason")) or "（系統保底）評分理由缺失。"
-    target_name = task.get("target_persona_name") or task["target_persona_id"]
-    result = {
-        "rater_id": rater.get("id"), "rater_name": rater.get("name"),
-        "target_persona_id": task["target_persona_id"], "target_persona_name": target_name,
-        "score": score, "reason": reason,
-    }
-    emit_event(
-        "score_proposal", f"{rater['name']} 評 {target_name}: {score}",
-        role=_persona_label(rater), extra=result,
-    )
-    return {"scores": [result]}
-
-
-def build_scoring_panel_subgraph():
-    g = StateGraph(ScoringPanelState)
-    g.add_node("score_proposal", instrument("score_proposal", score_proposal))
-    g.add_conditional_edges(START, fan_out_scoring, ["score_proposal"])
-    g.add_edge("score_proposal", END)
-    return g.compile()
-
-
-scoring_panel_graph = build_scoring_panel_subgraph()
-
-
-def compute_score_aggregates(scores: List[dict], persona_ids: List[str]) -> dict:
-    """回傳每個提案的平均分＋標準差——標準差就是驗收要的『分歧度數字』：
-    數字越大代表評分者意見越分歧，不是只看平均分排名。"""
-    by_target: dict = {pid: [] for pid in persona_ids}
-    for s in scores:
-        tid = s["target_persona_id"]
-        if tid in by_target:
-            by_target[tid].append(s["score"])
-    aggregates = {}
-    for pid, vals in by_target.items():
-        if not vals:
-            aggregates[pid] = {"mean": 0.0, "stdev": 0.0, "n": 0}
-            continue
-        mean = sum(vals) / len(vals)
-        var = sum((v - mean) ** 2 for v in vals) / len(vals)
-        aggregates[pid] = {"mean": round(mean, 3), "stdev": round(var ** 0.5, 3), "n": len(vals)}
-    return aggregates
-
-
-def select_top_k(aggregates: dict, k: int) -> List[str]:
-    ranked = sorted(aggregates.items(), key=lambda kv: kv[1]["mean"], reverse=True)
-    return [pid for pid, _ in ranked[:k]]
 
 
 # ---------------------------------------------------------------------------
@@ -1757,9 +1675,10 @@ class MeetingState(TypedDict):
     facilitator_log: Annotated[List[dict], operator.add]
     master_critiques: Annotated[List[dict], operator.add]
     wisdom_stats: dict
-    score_log: Annotated[List[dict], operator.add]
-    score_aggregates: dict
-    top_k_ids: List[str]
+    shared_draft: dict
+    co_creation_order: List[str]
+    co_creation_turn_index: int
+    co_creation_log: Annotated[List[dict], operator.add]
     prototypes: Annotated[List[dict], operator.add]
     three_lens_checks: Annotated[List[dict], operator.add]
 
@@ -1811,7 +1730,16 @@ def homework_worker(task: PersonaTask) -> dict:
         f"子圖完成，提案《{(result.get('proposal') or {}).get('title', '')}》，"
         f"耗時 {elapsed:.1f}s",
         role=_persona_label(persona),
-        extra={"elapsed_s": round(elapsed, 2)},
+        # 使用者要求點 homework_done 就能看到完整洞察／提案／BMC，才問得出
+        # 好問題——這時 result 已經是整個做功課子圖跑完的完整輸出，直接
+        # 把 proposal／insights／pov／hmw 整包放進 extra，不用等 present。
+        extra={
+            "elapsed_s": round(elapsed, 2),
+            "proposal": result.get("proposal") or {},
+            "insights": result.get("insights") or [],
+            "pov": result.get("pov") or "",
+            "hmw": result.get("hmw") or "",
+        },
     )
     return {
         "persona_results": [{
@@ -1843,6 +1771,13 @@ def _proposal_for_persona(state: MeetingState, pid: str) -> dict:
         if r["persona"]["id"] == pid:
             return r["proposal"]
     return {}
+
+
+def _insights_for_persona(state: MeetingState, pid: str) -> List[dict]:
+    for r in state["persona_results"]:
+        if r["persona"]["id"] == pid:
+            return r.get("insights") or []
+    return []
 
 
 def _recent_review_summary(state: MeetingState) -> str:
@@ -1982,6 +1917,10 @@ def ask_question(state: MeetingState) -> dict:
         "presenter_name": presenter.get("name"),
         "proposal_title": proposal.get("title"),
         "proposal_summary": proposal.get("summary"),
+        # 使用者要求人類介入點就看得到完整提案／BMC／洞察，才問得出好
+        # 問題——不能只憑標題跟一句摘要決定要不要提問。
+        "proposal": proposal,
+        "insights": _insights_for_persona(state, pid),
         "questions_asked_so_far": asked_so_far,
         "facilitator_reason": facilitator_reason,
         "prompt": (
@@ -2097,7 +2036,161 @@ def run_masters(state: MeetingState) -> dict:
     result = master_panel_graph.invoke({
         "topic": state["topic"], "idea_pool_summary": idea_pool_summary, "critiques": [],
     })
-    return {"master_critiques": result["critiques"]}
+    # 使用者要求討論收斂後由 4 位 persona 共創一個提案，不是選拔——共創
+    # 草稿的種子（起點）從 facilitator_log 最後一筆「present」決策取得，
+    # 不是固定拿 personas[0]：那只是設定檔順序，每次都選同一人會造成
+    # 不隨會議內容而變的偏見。用討論實際收斂到的地方當起點，才會隨每次
+    # 會議不同而變。種子本身不用額外 LLM 呼叫，直接沿用該 persona 目前
+    # 的最終提案。
+    seed_pid = next(
+        (e["chosen_persona_id"] for e in reversed(state["facilitator_log"]) if e["action"] == "present"),
+        state["personas"][0]["id"],
+    )
+    seed_proposal = _proposal_for_persona(state, seed_pid)
+    co_creation_order = [p["id"] for p in state["personas"] if p["id"] != seed_pid]
+    return {
+        "master_critiques": result["critiques"],
+        "shared_draft": seed_proposal,
+        "co_creation_order": co_creation_order,
+        "co_creation_turn_index": 0,
+    }
+
+
+def _ensure_co_creation_fields(
+    updated: dict, prev_draft: dict, persona: dict,
+    own_insights: List[dict], own_memory: List[dict], all_persona_ids: set,
+) -> dict:
+    pid = persona.get("id")
+    known_insight_ids = {i.get("id") for i in own_insights if i.get("id")}
+    known_memory_ids = {m.get("id") for m in own_memory if m.get("id")}
+
+    updated.setdefault("sources", prev_draft.get("sources") or [])
+    updated.setdefault("bmc", {})
+    try:
+        updated["self_score"] = float(updated.get("self_score", prev_draft.get("self_score", 0)))
+    except (TypeError, ValueError):
+        updated["self_score"] = float(prev_draft.get("self_score") or 0)
+    if not _safe_str(updated.get("hmw_response")):
+        updated["hmw_response"] = prev_draft.get("hmw_response", "")
+
+    # insight_refs/memory_refs 的 id 命名空間是「單一 persona 自己的」
+    # （每人的洞見都從 "i1" 開始編號）——共創草稿在多人輪流編輯下，直接
+    # 沿用裸 id 會讓不同人的 "i1" 互撞。這輪編輯的人只能引用自己真實
+    # 存在的 id，通過驗證後加上 persona id 前綴（"mei:i1"）才存進共創
+    # 草稿；前面幾輪別人留下、已經加過前綴的 refs 原樣保留，不清空。
+    new_insight_refs = [r for r in (updated.get("insight_refs") or []) if r in known_insight_ids]
+    new_memory_refs = [r for r in (updated.get("memory_refs") or []) if r in known_memory_ids]
+    updated["insight_refs"] = list(dict.fromkeys(
+        (prev_draft.get("insight_refs") or []) + [f"{pid}:{r}" for r in new_insight_refs]
+    ))
+    updated["memory_refs"] = list(dict.fromkeys(
+        (prev_draft.get("memory_refs") or []) + [f"{pid}:{r}" for r in new_memory_refs]
+    ))
+
+    # built_on_persona_ids：這輪聲稱整合了哪些「其他」成員的觀點，比對
+    # 真實存在的 persona id 集合、排除自己——不用 embedding_distance
+    # 門檻當「有沒有整合」的代理指標，單純距離大只代表「這輪改很多」，
+    # 不代表真的納入了別人的觀點（最後一輪編輯者整份改寫成自己的版本
+    # 反而距離最大，卻是整合失敗）。
+    built_on = [
+        bid for bid in (updated.get("built_on_persona_ids") or [])
+        if bid in all_persona_ids and bid != pid
+    ]
+    updated["built_on_persona_ids"] = list(dict.fromkeys(built_on))
+    if not _safe_str(updated.get("contribution_note")):
+        updated["contribution_note"] = "（系統保底）已整合團隊共創草稿。"
+    return updated
+
+
+def co_create_turn(state: MeetingState) -> dict:
+    order = state["co_creation_order"]
+    idx = state["co_creation_turn_index"]
+    pid = order[idx]
+    persona = next(p for p in state["personas"] if p.get("id") == pid)
+    prev_draft = state["shared_draft"]
+    own_result = next((r for r in state["persona_results"] if r["persona"]["id"] == pid), {})
+    own_proposal = own_result.get("proposal") or {}
+    own_insights = own_result.get("insights") or []
+    own_memory = own_result.get("recalled_memory") or []
+    own_research_items = own_result.get("research_items") or []
+    sources_block = "\n".join(f"- {it.get('title')} | {it.get('url')}" for it in own_research_items) or "（無）"
+    masters_block = "\n".join(
+        f"[{m.get('master_name')}] {m.get('critique')}" for m in state["master_critiques"]
+    ) or "（尚無大師點評）"
+    all_persona_ids = {p["id"] for p in state["personas"]}
+
+    role_token = _event_role.set(_persona_label(persona))
+    system = (
+        f"你是 {persona['name']}（{persona.get('role', '')}）。"
+        "這是團隊目前共同編輯的共創提案草稿——把你自己提案裡還沒被納入、"
+        "但你認為重要的觀點或資料整合進來，修正你認為不足的地方。"
+        "你不是要把草稿改寫成自己的版本，是做有建設性的整合式編輯，"
+        "保留其他人已經加進去、你認同的內容。"
+        "url 只能來自你自己的可用來源，insight_refs/memory_refs 只能引用"
+        "下面列出、屬於你自己的 id。"
+        + _PROPOSAL_SCHEMA_HINT
+        + "\n- built_on_persona_ids: [string] 這輪你認為自己整合/呼應了哪些"
+          "其他成員（persona id）的觀點，沒有就給空陣列，不能捏造"
+        + "\n- contribution_note: string（<=60字，說明你這輪具體加了/改了什麼）"
+    )
+    user = (
+        f"目前共創草稿：\n{json.dumps(prev_draft, ensure_ascii=False)}\n\n"
+        f"你自己的最終提案（參考用，不用照抄）：\n{json.dumps(own_proposal, ensure_ascii=False)}\n\n"
+        f"你可用來源：\n{sources_block}\n\n"
+        f"你可引用的訪談洞見：\n" + "\n".join(f"- [{i['id']}] {i['text']}" for i in own_insights) + "\n\n"
+        f"你可引用的跨場記憶：\n" + "\n".join(f"- [{m['id']}] {m['text']}" for m in own_memory) + "\n\n"
+        f"大師點評：\n{masters_block}"
+    )
+    try:
+        raw = call_llm(SMART_MODEL, system, user, max_tokens=2500)
+        data = extract_json_object(raw)
+        if not data:
+            data = extract_json_object(repair_json_text(raw))
+        updated = _ensure_co_creation_fields(data, prev_draft, persona, own_insights, own_memory, all_persona_ids)
+        candidate_bmc = updated.get("bmc") or {}
+        prev_bmc = prev_draft.get("bmc") or {}
+        updated["bmc"] = {
+            key: candidate_bmc.get(key)
+            if isinstance(candidate_bmc.get(key), str) and candidate_bmc[key].strip()
+            else prev_bmc.get(key, "")
+            for key in BMC_KEYS
+        }
+        if issues := assert_bmc_complete(updated):
+            raise ValueError(f"BMC 結構不變量失敗：{issues}")
+    finally:
+        _event_role.reset(role_token)
+
+    dist = embedding_distance(proposal_text_for_embed(prev_draft), proposal_text_for_embed(updated))
+    turn_log = {
+        "turn": idx + 1,
+        "persona_id": pid,
+        "persona_name": persona.get("name"),
+        "built_on_persona_ids": updated.get("built_on_persona_ids"),
+        "contribution_note": updated.get("contribution_note"),
+        "embedding_distance": round(dist, 4),
+        "diff_text": _diff_proposals(prev_draft, updated),
+    }
+    print(
+        f"  [co_create:{persona.get('name')} #{idx + 1}/{len(order)}] "
+        f"built_on={turn_log['built_on_persona_ids']} embed_dist={turn_log['embedding_distance']}"
+    )
+    emit_event(
+        "co_create_turn",
+        f"{persona['name']} 完成第 {idx + 1}/{len(order)} 輪共創編輯：{turn_log['contribution_note']}",
+        role=_persona_label(persona),
+        extra={**turn_log, "proposal": updated},
+    )
+    return {
+        "shared_draft": updated,
+        "co_creation_log": [turn_log],
+        "co_creation_turn_index": idx + 1,
+    }
+
+
+def route_after_co_create_turn(state: MeetingState) -> Literal["co_create_turn", "run_prototype_test"]:
+    if state["co_creation_turn_index"] < len(state["co_creation_order"]):
+        return "co_create_turn"
+    return "run_prototype_test"
 
 
 def write_wisdom(state: MeetingState) -> dict:
@@ -2108,57 +2201,37 @@ def write_wisdom(state: MeetingState) -> dict:
         idea_pool_versions=state["idea_pool_versions"],
         persona_results=state["persona_results"],
         three_lens_checks=state["three_lens_checks"],
+        co_created_proposal=state["shared_draft"],
+        co_creation_log=state["co_creation_log"],
     )
     emit_event("write_wisdom", f"寫入集體智慧庫：{stats}", extra=stats)
     print(f"  [write_wisdom] {stats}")
     return {"wisdom_stats": stats}
 
 
-def run_collective_scoring(state: MeetingState) -> dict:
-    """全體交叉評分彼此的最終提案，聚合出平均分＋標準差，選出 top-K
-    進入 Prototype/Test 階段。"""
-    final_proposals = {v["persona_id"]: v["proposal_after"] for v in state["idea_pool_versions"]}
-    result = scoring_panel_graph.invoke({
-        "personas": state["personas"], "final_proposals": final_proposals, "scores": [],
-    })
-    scores = result["scores"]
-    aggregates = compute_score_aggregates(scores, list(final_proposals.keys()))
-    k = min(TOP_K, len(final_proposals))
-    top_k_ids = select_top_k(aggregates, k)
-    id_to_name = {p.get("id"): p.get("name") for p in state["personas"]}
-    top_k_names = [id_to_name.get(pid, pid) for pid in top_k_ids]
-    emit_event(
-        "run_collective_scoring", f"評分完成，top-{k}：{top_k_names}",
-        extra={"aggregates": aggregates, "top_k_ids": top_k_ids},
-    )
-    print("  [collective_scoring] 評分聚合：")
-    for pid, agg in sorted(aggregates.items(), key=lambda kv: kv[1]["mean"], reverse=True):
-        marker = "★" if pid in top_k_ids else " "
-        print(f"    {marker} {pid}: mean={agg['mean']} stdev={agg['stdev']} (n={agg['n']})")
-    return {"score_log": scores, "score_aggregates": aggregates, "top_k_ids": top_k_ids}
+# 使用者要求把「全員互評打分、選 Top-K 進原型測試」改成「共創收斂成一個
+# 提案」——這個代表共創提案的合成 persona（不對應任何真實的 4 人）讓
+# run_prototype_test/run_three_lens_check 底下沿用的子圖（對「幾個提案」
+# 沒有結構性假設，見下方兩個函式）不用改，只是餵給它們剛好只有一筆。
+_CO_CREATED_PSEUDO_PERSONA = {"id": "co_created", "name": "共創提案小組", "role": "跨領域共創"}
 
 
 def run_prototype_test(state: MeetingState) -> dict:
-    final_proposals = {v["persona_id"]: v["proposal_after"] for v in state["idea_pool_versions"]}
-    persona_by_id = {p.get("id"): p for p in state["personas"]}
-    top_k_items = [
-        {"persona": persona_by_id[pid], "proposal": final_proposals[pid]}
-        for pid in state["top_k_ids"] if pid in final_proposals and pid in persona_by_id
-    ]
+    final_items = [{"persona": _CO_CREATED_PSEUDO_PERSONA, "proposal": state["shared_draft"]}]
     result = prototype_test_graph.invoke({
-        "top_k_items": top_k_items, "users": state["users"], "round_id": state["round_id"], "prototypes": [],
+        "top_k_items": final_items, "users": state["users"], "round_id": state["round_id"], "prototypes": [],
     })
     return {"prototypes": result["prototypes"]}
 
 
 def run_three_lens_check(state: MeetingState) -> dict:
-    """全員對每個 top-K（Test 之後的最終版）提案做三鏡檢核。"""
-    top_k_proposals = {p["persona_id"]: p["after"] for p in state["prototypes"]}
+    """全員對共創出的最終提案（Test 之後的最終版）做三鏡檢核。"""
+    final_proposals = {p["persona_id"]: p["after"] for p in state["prototypes"]}
     result = three_lens_panel_graph.invoke({
-        "personas": state["personas"], "top_k_proposals": top_k_proposals, "checks": [],
+        "personas": state["personas"], "top_k_proposals": final_proposals, "checks": [],
     })
     checks = result["checks"]
-    print(f"  [three_lens_check] {len(checks)} 筆檢核（{len(state['personas'])} 人 × {len(top_k_proposals)} 個提案）")
+    print(f"  [three_lens_check] {len(checks)} 筆檢核（{len(state['personas'])} 人 × {len(final_proposals)} 個共創提案）")
     return {"three_lens_checks": checks}
 
 
@@ -2170,8 +2243,8 @@ def build_parent_graph(checkpointer):
     g.add_node("answer_question", instrument("answer_question", answer_question))
     g.add_node("run_peer_review", instrument("run_peer_review", run_peer_review))
     g.add_node("run_masters", instrument("run_masters", run_masters))
+    g.add_node("co_create_turn", instrument("co_create_turn", co_create_turn))
     g.add_node("write_wisdom", instrument("write_wisdom", write_wisdom))
-    g.add_node("run_collective_scoring", instrument("run_collective_scoring", run_collective_scoring))
     g.add_node("run_prototype_test", instrument("run_prototype_test", run_prototype_test))
     g.add_node("run_three_lens_check", instrument("run_three_lens_check", run_three_lens_check))
     g.add_conditional_edges(START, fan_out_personas, ["homework_worker"])
@@ -2187,8 +2260,15 @@ def build_parent_graph(checkpointer):
     # 前互評／POV-HMW 也寫進 RAG，這些資料在原本的順序下 write_wisdom
     # 執行當下根本還不存在（run_three_lens_check 是最後一個節點）。
     # 移到最後一次寫，一次拿到全部資料，不用拆成兩次寫入。
-    g.add_edge("run_masters", "run_collective_scoring")
-    g.add_edge("run_collective_scoring", "run_prototype_test")
+    # 原本「全員互評選 Top-K」的 run_collective_scoring 已經整個移除
+    # （使用者要求改成共創收斂，不是選拔）：run_masters 收斂後改進
+    # co_create_turn 這個自我迴圈節點，4 位 persona 依序在同一份共享
+    # 草稿上各自編輯一輪，跑完才進原型測試/三鏡檢核。
+    g.add_edge("run_masters", "co_create_turn")
+    g.add_conditional_edges(
+        "co_create_turn", route_after_co_create_turn,
+        {"co_create_turn": "co_create_turn", "run_prototype_test": "run_prototype_test"},
+    )
     g.add_edge("run_prototype_test", "run_three_lens_check")
     g.add_edge("run_three_lens_check", "write_wisdom")
     g.add_edge("write_wisdom", END)
@@ -2224,7 +2304,7 @@ def run_baseline(topic: str, company: str) -> dict:
 def generate_final_verdict(
     *,
     topic: str,
-    top_k_proposals: List[dict],
+    co_created_proposal: dict,
     baseline_proposal: dict,
     baseline_metrics: dict,
     diversity_after: dict,
@@ -2232,22 +2312,24 @@ def generate_final_verdict(
     """使用者要求：最後讓 AI 直接比較這場真實資料裡 agent 流程 vs baseline
     的優劣，不是只有結構性的數字對照表——這段話要有觀點、具體點名兩邊的
     優勢與代價，也要誠實承認 baseline 的價值（速度快、成本低），不是為了
-    捧 agent 流程而失真。"""
-    top_k_summaries = "\n".join(
-        f"- 《{p.get('title', '')}》{p.get('summary', '')}" for p in top_k_proposals
-    ) or "（無 top-K 提案）"
+    捧 agent 流程而失真。使用者把流程從「選拔 top-K」改成「共創收斂成一個
+    提案」後，這裡也改成一對一比較共創提案 vs baseline，比原本「一個
+    baseline 對比多個候選」更乾淨。"""
     system = (
-        "你是一位產品策略顧問，要針對這場真實跑出來的資料，比較「多 agent 腦力激盪流程」"
-        "產出的 top-K 提案，跟「直接問 LLM 一次」的 baseline 提案，寫一段有觀點的優劣分析。"
+        "你是一位產品策略顧問，要針對這場真實跑出來的資料，比較「多 agent 共創收斂」"
+        "產出的最終提案，跟「直接問 LLM 一次」的 baseline 提案，寫一段有觀點的優劣分析。"
         "要具體點名兩邊各自的優勢與代價（不是空泛通則），並誠實承認 baseline 也有它的價值"
         "（例如速度快、成本低、適合初步發散），不要為了捧多 agent 流程而失真。只輸出正文，"
         "<=300字。"
     )
     user = (
         f"主題：{topic}\n\n"
-        f"多 agent 流程 top-K 提案：\n{top_k_summaries}\n\n"
+        f"多 agent 流程共創出的最終提案：《{co_created_proposal.get('title', '')}》"
+        f"{co_created_proposal.get('summary', '')}\n\n"
         f"Baseline 提案：《{baseline_proposal.get('title', '')}》{baseline_proposal.get('summary', '')}\n\n"
-        f"量化對照：同儕互評後點子多樣性（兩兩平均距離）={diversity_after.get('avg_distance')}，"
+        f"量化對照：4 位與會者收斂前彼此提案的多樣性（兩兩平均距離）="
+        f"{diversity_after.get('avg_distance')}（顯示最終共創提案是真的整合了不同起點的"
+        f"觀點，不是同一個想法換句話說），"
         f"baseline 真實搜尋引用數={baseline_metrics.get('real_citations')}（可能編造，無法驗證），"
         f"baseline 成本=${baseline_metrics.get('cost_usd', 0):.4f}"
     )
@@ -2320,9 +2402,8 @@ def save_outputs(
     master_critiques: List[dict],
     wisdom_stats: dict,
     recall_hits_total: int,
-    score_log: List[dict],
-    score_aggregates: dict,
-    top_k_ids: List[str],
+    co_creation_log: List[dict],
+    co_created_proposal: dict,
     prototypes: List[dict],
     three_lens_checks: List[dict],
     baseline_proposal: dict,
@@ -2353,9 +2434,12 @@ def save_outputs(
         "master_critiques": master_critiques,
         "wisdom_stats": wisdom_stats,
         "recall_hits_total": recall_hits_total,
-        "score_log": score_log,
-        "score_aggregates": score_aggregates,
-        "top_k_ids": top_k_ids,
+        # 使用者要求把「全員互評選 Top-K」改成「共創收斂成一個提案」——
+        # co_created_proposal 是 co_create_turn 迴圈跑完後 shared_draft
+        # 的最終值，跑到這裡它已經不是草稿而是定案版本，對外用更準確
+        # 的欄位名；co_creation_log 是每一輪誰改了什麼的完整記錄。
+        "co_creation_log": co_creation_log,
+        "co_created_proposal": co_created_proposal,
         "prototypes": prototypes,
         "three_lens_checks": three_lens_checks,
         "diversity_before_review": diversity_before,
@@ -2387,8 +2471,7 @@ def build_final_report_markdown(
     facilitator_log: List[dict],
     human_qa_log: List[dict],
     master_critiques: List[dict],
-    score_aggregates: dict,
-    top_k_ids: List[str],
+    co_creation_log: List[dict],
     prototypes: List[dict],
     three_lens_checks: List[dict],
     baseline_proposal: dict,
@@ -2426,45 +2509,44 @@ def build_final_report_markdown(
         L.append(f"{m['critique']}")
         L.append(f"- 首選：{m['top_pick_persona']}\n")
 
-    L.append("## 集體評分聚合\n")
-    L.append("| Persona | 平均分 | 標準差（分歧度） | Top-K |")
-    L.append("|---|---|---|---|")
-    for pid, agg in sorted(score_aggregates.items(), key=lambda kv: kv[1]["mean"], reverse=True):
-        marker = "★" if pid in top_k_ids else ""
-        L.append(f"| {id_to_name.get(pid, pid)} | {agg['mean']} | {agg['stdev']} | {marker} |")
-    L.append("")
+    L.append("## 第一輪訪談（Empathize，需求探索，做功課階段）\n")
+    L.append("4 位與會者各自做功課時，先對模擬用戶做的需求探索訪談，")
+    L.append("並各自整理出 POV／HMW——這些是後面共創編輯時每個人帶進來的")
+    L.append("素材：\n")
+    for r in persona_results:
+        transcript = r.get("interview_transcript") or []
+        L.append(f"### {r['persona']['name']}")
+        if r.get("pov") or r.get("hmw"):
+            L.append(f"**POV**：{r.get('pov', '')}")
+            L.append(f"**HMW**：{r.get('hmw', '')}\n")
+        for t in transcript:
+            L.append(f"- [{t['user_name']} 第{t['round']}輪] Q：{t['question']} / A：{t['answer']}")
+        L.append("")
 
-    L.append("## Top-K 最終提案詳情\n")
-    prototypes_by_pid = {p["persona_id"]: p for p in prototypes}
-    persona_result_by_pid = {r["persona"]["id"]: r for r in persona_results}
-    checks_by_target: dict = {}
-    for c in three_lens_checks:
-        checks_by_target.setdefault(c["target_persona_id"], []).append(c)
+    L.append("## 共創歷程\n")
+    L.append("4 位與會者聽取彼此意見、大師點評後，依序在同一份共享草稿上")
+    L.append("各自編輯一輪，收斂成一個共創提案（不是選拔出來的贏家）：\n")
+    if co_creation_log:
+        for turn in co_creation_log:
+            built_on = [id_to_name.get(bid, bid) for bid in (turn.get("built_on_persona_ids") or [])]
+            L.append(f"### 第 {turn['turn']} 輪：{turn['persona_name']}")
+            L.append(f"{turn.get('contribution_note', '')}")
+            L.append(f"- 整合了：{'、'.join(built_on) if built_on else '（無）'}")
+            L.append(f"- embedding 位移：{turn.get('embedding_distance')}\n")
+    else:
+        L.append("（本場沒有共創編輯紀錄）\n")
 
-    for pid in top_k_ids:
-        proto = prototypes_by_pid.get(pid)
-        if not proto:
-            continue
-        pr = persona_result_by_pid.get(pid, {})
+    L.append("## 共創最終提案\n")
+    proto = prototypes[0] if prototypes else None
+    if proto:
         final_proposal = proto["after"]
-        L.append(f"### {proto['persona_name']}：《{final_proposal.get('title', '')}》\n")
+        L.append(f"### 《{final_proposal.get('title', '')}》\n")
         L.append(f"**摘要**：{final_proposal.get('summary', '')}\n")
-        L.append(f"**POV**：{pr.get('pov', '')}")
-        L.append(f"**HMW**：{pr.get('hmw', '')}\n")
         L.append("**BMC**：\n")
         for k in BMC_KEYS:
             L.append(f"- {k}：{(final_proposal.get('bmc') or {}).get(k, '')}")
         L.append(f"\n**原型**：`{proto['html_path']}`（可直接用瀏覽器開啟）\n")
         L.append(f"**測試後修正說明**：{proto['revision_note']}（embedding 距離 {proto['embedding_distance']}）\n")
-
-        L.append("**第一輪訪談（Empathize，需求探索，做功課階段）**：\n")
-        transcript = pr.get("interview_transcript") or []
-        if transcript:
-            for t in transcript:
-                L.append(f"- [{t['user_name']} 第{t['round']}輪] Q：{t['question']} / A：{t['answer']}")
-        else:
-            L.append("（無逐字稿記錄）")
-        L.append("")
 
         L.append("**第二輪訪談（Test，概念驗證，看過原型後的反應）**：\n")
         for r in proto["reactions"]:
@@ -2472,11 +2554,13 @@ def build_final_report_markdown(
         L.append("")
 
         L.append("**三鏡檢核（全員共同動作）**：\n")
-        for c in checks_by_target.get(pid, []):
+        for c in three_lens_checks:
             L.append(f"- **{c['persona_name']}** — 正面：{c['positive']}")
             L.append(f"  負面：{c['negative']}")
             L.append(f"  洞見：{c['insight']}")
         L.append("\n---\n")
+    else:
+        L.append("（本場沒有共創提案的原型測試紀錄）\n")
 
     L.append("## Baseline 對照（直接問 LLM vs 完整會議流程）\n")
     L.append(f"**Baseline 提案**：《{baseline_proposal.get('title', '')}》{baseline_proposal.get('summary', '')}\n")
@@ -2607,7 +2691,6 @@ def main() -> None:
     print(f"主題：{topic}")
     print(f"Thread／round_id：{thread_id}（checkpoint db：{CHECKPOINT_DB_PATH}）")
     print(f"Persona 人數：{len(personas)}；模擬使用者人數：{len(users)}；硬上限：{MAX_ROUNDS} 輪／${MAX_BUDGET_USD}")
-    print(f"Top-K：{TOP_K}")
     print(f"Chroma 現有筆數：wisdom={wisdom_count_before}, interviews={interviews_count_before}")
     print(f"事件流：{EVENTS_PATH}")
     print()
@@ -2632,9 +2715,10 @@ def main() -> None:
             "facilitator_log": [],
             "master_critiques": [],
             "wisdom_stats": {},
-            "score_log": [],
-            "score_aggregates": {},
-            "top_k_ids": [],
+            "shared_draft": {},
+            "co_creation_order": [],
+            "co_creation_turn_index": 0,
+            "co_creation_log": [],
             "prototypes": [],
             "three_lens_checks": [],
         },
@@ -2654,9 +2738,8 @@ def main() -> None:
     facilitator_log = final_state["facilitator_log"]
     master_critiques = final_state["master_critiques"]
     wisdom_stats = final_state["wisdom_stats"]
-    score_log = final_state["score_log"]
-    score_aggregates = final_state["score_aggregates"]
-    top_k_ids = final_state["top_k_ids"]
+    co_creation_log = final_state["co_creation_log"]
+    co_created_proposal = final_state["shared_draft"]
     prototypes = final_state["prototypes"]
     three_lens_checks = final_state["three_lens_checks"]
 
@@ -2676,11 +2759,16 @@ def main() -> None:
     diversity_before = pairwise_diversity(before_proposals)
     diversity_after = pairwise_diversity(after_proposals)
 
+    # 使用者要求最終比較的是「共創收斂出的一個提案」vs baseline，不是
+    # 「baseline 對比多個候選」——用原型測試後的最終版本（prototypes[0]
+    # ["after"]），而不是測試前的 co_created_proposal，才是這場會議
+    # 真正產出的最終定案。
+    final_co_created_proposal = prototypes[0]["after"] if prototypes else co_created_proposal
+
     print()
     print("=== AI 對照評語：agent 流程 vs baseline ===")
-    top_k_proposals = [after_proposals_by_persona[pid] for pid in top_k_ids if pid in after_proposals_by_persona]
     final_verdict = generate_final_verdict(
-        topic=topic, top_k_proposals=top_k_proposals, baseline_proposal=baseline_proposal,
+        topic=topic, co_created_proposal=final_co_created_proposal, baseline_proposal=baseline_proposal,
         baseline_metrics=baseline_metrics, diversity_after=diversity_after,
     )
     print(f"  {final_verdict}")
@@ -2698,9 +2786,8 @@ def main() -> None:
         master_critiques=master_critiques,
         wisdom_stats=wisdom_stats,
         recall_hits_total=recall_hits_total,
-        score_log=score_log,
-        score_aggregates=score_aggregates,
-        top_k_ids=top_k_ids,
+        co_creation_log=co_creation_log,
+        co_created_proposal=final_co_created_proposal,
         prototypes=prototypes,
         three_lens_checks=three_lens_checks,
         baseline_proposal=baseline_proposal,
@@ -2720,8 +2807,7 @@ def main() -> None:
         facilitator_log=facilitator_log,
         human_qa_log=human_qa_log,
         master_critiques=master_critiques,
-        score_aggregates=score_aggregates,
-        top_k_ids=top_k_ids,
+        co_creation_log=co_creation_log,
         prototypes=prototypes,
         three_lens_checks=three_lens_checks,
         baseline_proposal=baseline_proposal,
@@ -2734,13 +2820,15 @@ def main() -> None:
     report_path.write_text(report_md, encoding="utf-8")
 
     print()
-    print("=== 集體評分聚合 ===")
-    for pid, agg in sorted(score_aggregates.items(), key=lambda kv: kv[1]["mean"], reverse=True):
-        marker = "★ top-K" if pid in top_k_ids else "  "
-        print(f"  {marker} {pid}: mean={agg['mean']} stdev={agg['stdev']}（分歧度）(n={agg['n']})")
+    print("=== 共創歷程 ===")
+    for turn in co_creation_log:
+        print(
+            f"  第{turn['turn']}輪 {turn['persona_name']}：{turn['contribution_note']} "
+            f"(整合={turn['built_on_persona_ids']}, embed_dist={turn['embedding_distance']})"
+        )
 
     print()
-    print("=== Prototype + Test（top-K）===")
+    print("=== Prototype + Test（共創提案）===")
     for p in prototypes:
         print(f"  {p['persona_name']}：{p['landing_page']['headline']}")
         print(f"    HTML：{p['html_path']}")
@@ -2750,13 +2838,8 @@ def main() -> None:
 
     print()
     print("=== 三鏡檢核（全員共同動作）===")
-    checks_by_target: dict = {}
     for c in three_lens_checks:
-        checks_by_target.setdefault(c["target_persona_id"], []).append(c)
-    for pid in top_k_ids:
-        print(f"  提案 {pid}：{len(checks_by_target.get(pid, []))} 筆檢核")
-        for c in checks_by_target.get(pid, []):
-            print(f"    {c['persona_name']} → 正面{len(c['positive'])}/負面{len(c['negative'])}/洞見{len(c['insight'])}")
+        print(f"    {c['persona_name']} → 正面{len(c['positive'])}/負面{len(c['negative'])}/洞見{len(c['insight'])}")
 
     print()
     print(f"最終報告：{report_path}")
@@ -2772,18 +2855,22 @@ def main() -> None:
         for r in review_log
     )
     masters_ok = len(master_critiques) == len(MASTERS) and all(m["critique"] for m in master_critiques)
-    scoring_ok = all(pid in score_aggregates for pid in presented_ids) and all(
-        agg["n"] >= 1 for agg in score_aggregates.values()
+    # 使用者要求把「全員互評選 Top-K」改成「共創收斂成一個提案」——原本
+    # 驗證「每份最終提案都有評分聚合」的 scoring_ok 已經沒有對應的東西可
+    # 驗證，改成驗證共創迴圈真的逐輪跑完（4 人 - 1 位種子 = 3 輪編輯，
+    # 每輪都留下記錄），取代原本「Top-K 形狀不變量」的角色。
+    co_creation_ok = len(co_creation_log) == len(personas) - 1 and all(
+        turn.get("contribution_note") for turn in co_creation_log
     )
     prototypes_ok = (
-        len(prototypes) == len(top_k_ids)
+        len(prototypes) == 1
         and all(Path(p["html_path"]).exists() and Path(p["html_path"]).stat().st_size > 0 for p in prototypes)
     )
     test_changed_version = all(
         p["embedding_distance"] > 0.0 and p["diff_text"].strip() for p in prototypes
     )
     three_lens_shape_ok = (
-        len(three_lens_checks) == len(personas) * len(top_k_ids)
+        len(three_lens_checks) == len(personas)
         and all(
             len(c["positive"]) == 3 and len(c["negative"]) == 3 and len(c["insight"]) == 3
             for c in three_lens_checks
@@ -2805,10 +2892,10 @@ def main() -> None:
     print(f"發表總次數：{len(idea_pool_versions)}（硬上限 {MAX_ROUNDS}）：{'未超過' if within_round_cap else '超過！'}")
     print(f"互評每則恰好 3/3/3：{'是' if reviews_shape_ok else '否'}")
     print(f"三大師皆有點評：{'是' if masters_ok else '否'}")
-    print(f"每份最終提案都有評分聚合（含分歧度）：{'是' if scoring_ok else '否'}")
-    print(f"Top-K 原型皆已寫出可開啟的 HTML：{'是' if prototypes_ok else '否'}")
+    print(f"共創迴圈逐輪跑完（{len(co_creation_log)}/{len(personas) - 1} 輪，每輪都有貢獻說明）：{'是' if co_creation_ok else '否'}")
+    print(f"共創提案的原型已寫出可開啟的 HTML：{'是' if prototypes_ok else '否'}")
     print(f"測試反應真的改變了最終版本（embed_dist>0 且有實際 diff）：{'是' if test_changed_version else '否'}")
-    print(f"三鏡檢核格式不變量（{len(personas)}人×{len(top_k_ids)}提案，每筆恰好3/3/3）：{'是' if three_lens_shape_ok else '否'}")
+    print(f"三鏡檢核格式不變量（{len(personas)}人×1個共創提案，每筆恰好3/3/3）：{'是' if three_lens_shape_ok else '否'}")
     print(f"最終報告完整（含人類問答＋兩輪訪談記錄）：{'是' if report_complete else '否'}")
     print(f"提案多樣性：互評前 {diversity_before['avg_distance']} → 互評後 {diversity_after['avg_distance']}")
     print(f"總耗時：{wall_elapsed:.1f}s")
@@ -2822,7 +2909,7 @@ def main() -> None:
         and within_round_cap
         and reviews_shape_ok
         and masters_ok
-        and scoring_ok
+        and co_creation_ok
         and prototypes_ok
         and test_changed_version
         and three_lens_shape_ok

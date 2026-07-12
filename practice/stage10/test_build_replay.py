@@ -38,6 +38,11 @@ class ComputeComparisonTests(unittest.TestCase):
             "prototypes": [{"persona_id": "a"}],
             "recall_hits_total": 5,
             "diversity_after_review": {"avg_distance": 0.31},
+            "personas": [{"id": "a"}, {"id": "b"}, {"id": "c"}],
+            "co_creation_log": [
+                {"persona_id": "b", "built_on_persona_ids": ["a"]},
+                {"persona_id": "c", "built_on_persona_ids": ["a", "b"]},
+            ],
             "master_critiques": [{}, {}, {}],
             "three_lens_checks": [{}] * 6,
             "human_qa_log": [{}],
@@ -59,7 +64,8 @@ class ComputeComparisonTests(unittest.TestCase):
 
     def test_revision_count_sums_versions_and_prototypes(self):
         c = br.compute_comparison(self._run_data())
-        self.assertEqual(c["revision_count"]["agent"], 2 + 1)  # 2 idea_pool_versions + 1 prototype
+        # 2 idea_pool_versions + 2 co_creation_log 輪次 + 1 prototype
+        self.assertEqual(c["revision_count"]["agent"], 2 + 2 + 1)
         self.assertEqual(c["revision_count"]["baseline"], 0)
 
     def test_cross_round_memory_counts_actual_citations_not_just_hits(self):
@@ -68,10 +74,21 @@ class ComputeComparisonTests(unittest.TestCase):
         self.assertEqual(c["cross_round_memory"]["agent_actually_cited"], 2)
         self.assertEqual(c["cross_round_memory"]["agent_recall_hits"], 5)
 
-    def test_diversity_baseline_is_explicitly_not_applicable(self):
+    def test_cross_domain_integration_baseline_is_explicitly_not_applicable(self):
         c = br.compute_comparison(self._run_data())
-        self.assertIn("N/A", c["diversity"]["baseline"])
-        self.assertEqual(c["diversity"]["agent"], 0.31)
+        self.assertIn("N/A", c["cross_domain_integration"]["baseline"])
+
+    def test_cross_domain_integration_counts_seed_plus_referenced_editors(self):
+        # 種子 persona 是沒有 co_creation_log 條目的那一個（a）——算 1 位真實
+        # 整合；b/c 都在某一輪的 built_on_persona_ids 裡出現過，也各算 1 位。
+        # a 自己雖然也在 built_on_persona_ids 裡，但那不重複計算（集合聯集）。
+        c = br.compute_comparison(self._run_data())
+        self.assertIn("2/3", c["cross_domain_integration"]["agent"])
+
+    def test_cross_domain_integration_falls_back_gracefully_with_no_co_creation_log(self):
+        c = br.compute_comparison(self._run_data(co_creation_log=[], personas=[]))
+        self.assertIn("N/A", c["cross_domain_integration"]["baseline"])
+        self.assertIn("0/1", c["cross_domain_integration"]["agent"])
 
     def test_handles_zero_agent_proposals_without_crashing(self):
         c = br.compute_comparison(self._run_data(idea_pool_versions=[]))

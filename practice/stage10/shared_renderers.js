@@ -189,8 +189,28 @@ function renderExtraGeneric(action, extra) {
         kv('自評分數變化', `${extra.self_score_before} → ${extra.self_score_after}（Δ${extra.self_score_delta > 0 ? '+' : ''}${extra.self_score_delta}）`) +
         block('具體改了什麼（跟分數並陳，不是只有數字）', extra.diff_text ? `<pre>${esc(extra.diff_text)}</pre>` : '') +
         renderProposal(extra.proposal, `第 ${extra.round} 輪修正後的完整提案`);
+    case 'co_create_turn':
+      // 使用者要求把「各自提案、互評選 Top-K」改成「共創收斂成一個
+      // 提案」——這是共創迴圈裡的一輪，跟 refine 一樣 diff／完整提案並陳，
+      // 額外多一行「整合了誰的觀點」（built_on_persona_ids，已在後端驗證
+      // 過是真實存在的其他成員，不是模型自己編的）。
+      return kv('第幾輪', `${extra.turn}`) +
+        kv('整合了', (extra.built_on_persona_ids || []).map(personaName).join('、') || '（無）') +
+        kv('這輪貢獻', extra.contribution_note) +
+        kv('embedding 位移', extra.embedding_distance) +
+        block('這輪具體改了什麼', extra.diff_text ? `<pre>${esc(extra.diff_text)}</pre>` : '') +
+        renderProposal(extra.proposal, `第 ${extra.turn} 輪編輯後的共創草稿`);
     case 'homework_done':
-      return kv('耗時', extra.elapsed_s ? extra.elapsed_s.toFixed(1) + ' 秒' : '');
+      // 使用者要求點 homework_done 就看得到完整洞察／提案／BMC，才問得出
+      // 好問題——不用等到 present 事件或回放頁。POV/HMW 特意從 extra 頂層
+      // 拿（不是 extra.proposal.pov/hmw）：提案 JSON schema 只有
+      // hmw_response，沒有 pov/hmw 這兩個欄位，renderProposal() 讀
+      // p.pov/p.hmw 對真實提案物件永遠是空的。
+      return kv('耗時', extra.elapsed_s ? extra.elapsed_s.toFixed(1) + ' 秒' : '') +
+        block('POV', extra.pov ? `<p>${esc(extra.pov)}</p>` : '') +
+        block('HMW', extra.hmw ? `<p>${esc(extra.hmw)}</p>` : '') +
+        block('訪談洞見', ul(extra.insights)) +
+        renderProposal(extra.proposal, '做完功課後的完整提案');
     case 'facilitator_decide':
       return kv('第幾輪', extra.round) + kv('動作', extra.action) + kv('指定人選', extra.chosen_persona_name) +
         block('理由', extra.reason ? `<p>${esc(extra.reason)}</p>` : '') +

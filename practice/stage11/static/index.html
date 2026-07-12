@@ -196,6 +196,7 @@
       </div>
       <div id="hitlPresenter"></div>
       <div id="hitlProposal" style="margin:8px 0;color:#c4cbe0;font-size:0.9rem;"></div>
+      <div id="hitlDetail" style="margin:8px 0;max-height:340px;overflow-y:auto;font-size:0.85rem;"></div>
       <div id="hitlFacilitatorReason" style="display:none;margin:8px 0;padding:8px 12px;background:#1b1420;border-left:3px solid #ffb45455;border-radius:4px;font-size:0.85rem;color:#c4a86e;"></div>
       <div class="hitl-questions" id="hitlQuestions"></div>
       <div class="row">
@@ -438,7 +439,7 @@ document.getElementById('btnStartRun').addEventListener('click', async () => {
 
 // ---------- 即時畫面 ----------
 const TOPO_NODES = ["homework_worker", "facilitator_decide", "ask_question", "answer_question",
-  "run_peer_review", "run_masters", "write_wisdom", "run_collective_scoring", "run_prototype_test", "run_three_lens_check"];
+  "run_peer_review", "run_masters", "co_create_turn", "run_prototype_test", "run_three_lens_check", "write_wisdom"];
 
 // events.jsonl 的 `node` 欄位是 instrument() 包住的「實際跑的那個函式」名字，
 // 對巢狀子圖（homework_worker／run_peer_review／run_masters／
@@ -457,7 +458,7 @@ const NODE_TO_SUPERVISOR = {
   homework_worker: "homework_worker",
   give_feedback: "run_peer_review", revise_after_feedback: "run_peer_review", run_peer_review: "run_peer_review",
   master_critique: "run_masters", run_masters: "run_masters",
-  score_proposal: "run_collective_scoring", run_collective_scoring: "run_collective_scoring",
+  co_create_turn: "co_create_turn",
   generate_prototype_and_test: "run_prototype_test", run_prototype_test: "run_prototype_test",
   three_lens_check: "run_three_lens_check", run_three_lens_check: "run_three_lens_check",
   facilitator_decide: "facilitator_decide", ask_question: "ask_question", answer_question: "answer_question",
@@ -572,6 +573,12 @@ function showHitl(payload) {
   const presonaMeta = PERSONAS.find(p => p.id === payload.presenter_id);
   document.getElementById('hitlPresenter').innerHTML = `${avatarHtml(payload.presenter_id, payload.presenter_name, 'sm')} <b>${esc(payload.presenter_name)}</b>${presonaMeta ? '（' + esc(presonaMeta.role) + '）' : ''}`;
   document.getElementById('hitlProposal').innerHTML = `《${esc(payload.proposal_title)}》<br>${esc(payload.proposal_summary || '')}`;
+  // 使用者要求人類介入點就看得到完整洞察／提案／BMC，才問得出好問題——
+  // 不能只憑標題跟一句摘要決定要不要提問。renderBmc/block/ul 來自
+  // shared_renderers.js（<script src> 已經先載入）。
+  document.getElementById('hitlDetail').innerHTML =
+    block('訪談洞見', ul(payload.insights)) +
+    block('Business Model Canvas', renderBmc((payload.proposal && payload.proposal.bmc) || {}));
   const reasonEl = document.getElementById('hitlFacilitatorReason');
   if (payload.facilitator_reason) {
     reasonEl.style.display = 'block';
