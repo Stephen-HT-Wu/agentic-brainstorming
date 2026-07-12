@@ -88,7 +88,7 @@ if _env_file.exists():
             os.environ.setdefault(_key.strip(), _value.strip())
 
 CHEAP_MODEL = "claude-haiku-4-5-20251001"
-FACILITATOR_MODEL = "claude-sonnet-5"
+SMART_MODEL = "claude-sonnet-5"
 client = anthropic.Anthropic(timeout=90.0)  # stage7 真實跑測踩過 3+ 小時網路卡死，見 stage7 note
 
 DEDUP_SIMILARITY_THRESHOLD = 0.80
@@ -564,7 +564,7 @@ def synthesize(state: HomeworkState) -> dict:
         f"搜尋素材：\n{bullet}\n\n"
         "請輸出：1) 市場／競品觀察 2) 對自家有利的切入點 3) 風險與未知。"
     )
-    brief = call_llm(CHEAP_MODEL, system, user, max_tokens=2000)
+    brief = call_llm(SMART_MODEL, system, user, max_tokens=2000)
     emit_event("synthesize", f"彙整 brief {len(brief)} 字，素材 {len(items)} 筆，跨輪記憶 {len(memory)} 筆")
     return {"research_brief": brief}
 
@@ -582,7 +582,7 @@ def design_interview_guide(state: HomeworkState) -> dict:
         f"你的關注面向：{', '.join(persona.get('focus') or [])}\n\n"
         f"研究彙整（節錄）：\n{state['research_brief'][:800]}"
     )
-    raw = call_llm(CHEAP_MODEL, system, user, max_tokens=500)
+    raw = call_llm(SMART_MODEL, system, user, max_tokens=500)
     data = extract_json_object(raw)
     questions = [q for q in (data.get("questions") or []) if isinstance(q, str) and q.strip()]
     if not questions:
@@ -613,7 +613,7 @@ def simulate_user_answer(user: dict, question: str, prior_turns: List[dict]) -> 
     system = _user_system_prompt(user)
     history = "\n".join(f"Q: {t['question']}\nA: {t['answer']}" for t in prior_turns) or "（尚無先前對話）"
     prompt = f"先前對話：\n{history}\n\n新問題：{question}"
-    return call_llm(CHEAP_MODEL, system, prompt, max_tokens=300).strip()
+    return call_llm(SMART_MODEL, system, prompt, max_tokens=300).strip()
 
 
 def generate_followup_question(persona: dict, prior_turns: List[dict]) -> str:
@@ -625,7 +625,7 @@ def generate_followup_question(persona: dict, prior_turns: List[dict]) -> str:
         "只輸出問題本身（<=30 字），不要加解說或引號。"
     )
     prompt = f"訪談記錄：\n{history}\n\n對方剛回答：{last_answer}\n\n下一個追問？"
-    question = call_llm(CHEAP_MODEL, system, prompt, max_tokens=150).strip()
+    question = call_llm(SMART_MODEL, system, prompt, max_tokens=150).strip()
     return question or f"能不能多說一點「{last_answer[:15]}」這件事？"
 
 
@@ -676,7 +676,7 @@ def extract_insights(state: HomeworkState) -> dict:
         "最多 5 則，每則必須具體可回溯到某位受訪者說的話，不要空泛通則。"
     )
     user = f"完整逐字稿：\n{lines}"
-    raw = call_llm(CHEAP_MODEL, system, user, max_tokens=1200)
+    raw = call_llm(SMART_MODEL, system, user, max_tokens=1200)
     data = extract_json_object(raw)
     if not data:
         data = extract_json_object(repair_json_text(raw))
@@ -702,7 +702,7 @@ def write_pov_hmw(state: HomeworkState) -> dict:
         "兩者都要具體對應到下面列出的洞見，不要寫空泛通則。"
     )
     user = f"洞見清單：\n{insights_block}"
-    raw = call_llm(CHEAP_MODEL, system, user, max_tokens=900)
+    raw = call_llm(SMART_MODEL, system, user, max_tokens=900)
     data = extract_json_object(raw)
     pov = _safe_str(data.get("pov"))
     hmw = _safe_str(data.get("hmw"))
@@ -754,7 +754,7 @@ def _parse_proposal(text: str) -> dict:
 
 
 def _request_proposal(system: str, user: str) -> dict:
-    raw = call_llm(CHEAP_MODEL, system, user, max_tokens=2500)
+    raw = call_llm(SMART_MODEL, system, user, max_tokens=2500)
     try:
         return _parse_proposal(raw)
     except ValueError:
@@ -763,7 +763,7 @@ def _request_proposal(system: str, user: str) -> dict:
             "只輸出精簡合法 JSON object，不要 markdown。"
             + _PROPOSAL_SCHEMA_HINT
         )
-        raw2 = call_llm(CHEAP_MODEL, compact_system, user[:6000], max_tokens=2500)
+        raw2 = call_llm(SMART_MODEL, compact_system, user[:6000], max_tokens=2500)
         return _parse_proposal(raw2)
 
 
@@ -1026,7 +1026,7 @@ def give_feedback(task: ReviewTask) -> dict:
         f"發表後的人類問答：\n{qa_block}"
     )
     try:
-        raw = call_llm(CHEAP_MODEL, system, user, max_tokens=700)
+        raw = call_llm(SMART_MODEL, system, user, max_tokens=700)
         data = extract_json_object(raw)
         review = _ensure_review_shape(data, reviewer, presenter_name)
     finally:
@@ -1088,7 +1088,7 @@ def revise_after_feedback(state: ReviewRoundState) -> dict:
     )
     user = f"你的提案：\n{json.dumps(proposal, ensure_ascii=False)}\n\n收到的意見：\n{reviews_block}"
     try:
-        raw = call_llm(CHEAP_MODEL, system, user, max_tokens=2000)
+        raw = call_llm(SMART_MODEL, system, user, max_tokens=2000)
         data = extract_json_object(raw)
         if not data:
             data = extract_json_object(repair_json_text(raw))
@@ -1162,7 +1162,7 @@ def master_critique(task: MasterTask) -> dict:
     )
     user = f"主題：{task['topic']}\n\n最終提案組合：\n{task['idea_pool_summary']}"
     try:
-        raw = call_llm(FACILITATOR_MODEL, system, user, max_tokens=2000)
+        raw = call_llm(SMART_MODEL, system, user, max_tokens=2000)
         data = extract_json_object(raw)
     finally:
         _event_role.reset(role_token)
@@ -1464,7 +1464,7 @@ def generate_prototype_and_test(task: PrototypeTask) -> dict:
             f"標題：{proposal.get('title')}\n摘要：{proposal.get('summary')}\n"
             f"BMC：{json.dumps(proposal.get('bmc'), ensure_ascii=False)}"
         )
-        raw = call_llm(CHEAP_MODEL, system, user, max_tokens=1200)
+        raw = call_llm(SMART_MODEL, system, user, max_tokens=1200)
         data = extract_json_object(raw)
         data = _ensure_landing_page_fields(data, proposal)
         page_html = render_landing_page_html(data, proposal)
@@ -1489,7 +1489,7 @@ def generate_prototype_and_test(task: PrototypeTask) -> dict:
                 f"概念說明：\n{data['concept_one_pager']}\n\n"
                 f"主打特色：{[f['title'] for f in data['features']]}\n\n你的第一反應是？"
             )
-            reaction = call_llm(CHEAP_MODEL, system_u, user_prompt, max_tokens=300).strip()
+            reaction = call_llm(SMART_MODEL, system_u, user_prompt, max_tokens=300).strip()
             reactions.append({"user_id": user.get("id"), "user_name": user.get("name"), "reaction": reaction})
             emit_event(
                 "test_prototype", f"{user.get('name')} 對 {persona['name']} 原型的反應",
@@ -1506,7 +1506,7 @@ def generate_prototype_and_test(task: PrototypeTask) -> dict:
             "\"revision_note\":\"<=80字，具體說明因為哪則用戶反應改了什麼\"}"
         )
         user_r = f"原提案：\n{json.dumps(proposal, ensure_ascii=False)}\n\n用戶測試反應：\n{reactions_block}"
-        raw2 = call_llm(CHEAP_MODEL, system_r, user_r, max_tokens=2000)
+        raw2 = call_llm(SMART_MODEL, system_r, user_r, max_tokens=2000)
         data2 = extract_json_object(raw2)
         if not data2:
             data2 = extract_json_object(repair_json_text(raw2))
@@ -1607,7 +1607,7 @@ def three_lens_check(task: ThreeLensTask) -> dict:
         f"BMC：{json.dumps(proposal.get('bmc'), ensure_ascii=False)}"
     )
     try:
-        raw = call_llm(CHEAP_MODEL, system, user, max_tokens=700)
+        raw = call_llm(SMART_MODEL, system, user, max_tokens=700)
         data = extract_json_object(raw)
     finally:
         _event_role.reset(role_token)
@@ -1813,9 +1813,9 @@ def facilitator_decide(state: MeetingState) -> Command[Literal["ask_question", "
     )
     role_token = _event_role.set("facilitator")
     try:
-        # max_tokens 開大：FACILITATOR_MODEL 真實跑測踩過『整個預算被 extended
+        # max_tokens 開大：SMART_MODEL 真實跑測踩過『整個預算被 extended
         # thinking 吃光、連 retry 兩次後都吐不出一個字』的崩潰（見 stage7 note）。
-        raw = call_llm(FACILITATOR_MODEL, system, user, max_tokens=2000)
+        raw = call_llm(SMART_MODEL, system, user, max_tokens=2000)
         data = extract_json_object(raw)
     finally:
         _event_role.reset(role_token)
@@ -1916,7 +1916,7 @@ def answer_question(state: MeetingState) -> dict:
         f"人類提問：{question}"
     )
     try:
-        answer = call_llm(CHEAP_MODEL, system, user, max_tokens=800).strip()
+        answer = call_llm(SMART_MODEL, system, user, max_tokens=800).strip()
     finally:
         _event_role.reset(role_token)
     qa_entry = {
