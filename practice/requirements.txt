@@ -4,3 +4,5 @@ anthropic>=0.40
 pyyaml>=6.0
 ddgs>=9.0
 chromadb>=1.0
+fastapi>=0.115
+uvicorn>=0.30
