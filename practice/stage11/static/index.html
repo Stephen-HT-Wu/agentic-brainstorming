@@ -156,6 +156,7 @@
       <h3>⏸ 人類介入點</h3>
       <div id="hitlPresenter"></div>
       <div id="hitlProposal" style="margin:8px 0;color:#c4cbe0;font-size:0.9rem;"></div>
+      <div id="hitlFacilitatorReason" style="display:none;margin:8px 0;padding:8px 12px;background:#1b1420;border-left:3px solid #ffb45455;border-radius:4px;font-size:0.85rem;color:#c4a86e;"></div>
       <div class="hitl-questions" id="hitlQuestions"></div>
       <div class="row">
         <input type="text" id="hitlQuestionInput" placeholder="輸入問題（可留空直接跳過）" style="flex:1;margin-bottom:0;">
@@ -571,6 +572,13 @@ function showHitl(payload) {
   const presonaMeta = runPersonas.find(p => p.id === payload.presenter_id);
   document.getElementById('hitlPresenter').innerHTML = `${avatarHtml(payload.presenter_id, payload.presenter_name, 'sm')} <b>${esc(payload.presenter_name)}</b>${presonaMeta ? '（' + esc(presonaMeta.role) + '）' : ''}`;
   document.getElementById('hitlProposal').innerHTML = `《${esc(payload.proposal_title)}》<br>${esc(payload.proposal_summary || '')}`;
+  const reasonEl = document.getElementById('hitlFacilitatorReason');
+  if (payload.facilitator_reason) {
+    reasonEl.style.display = 'block';
+    reasonEl.innerHTML = `<b>主持人為什麼選${esc(payload.presenter_name)}：</b>${esc(payload.facilitator_reason)}`;
+  } else {
+    reasonEl.style.display = 'none';
+  }
   document.getElementById('hitlQuestions').textContent = `已經問過 ${payload.questions_asked_so_far || 0} 題`;
   document.getElementById('hitlQuestionInput').value = '';
 }

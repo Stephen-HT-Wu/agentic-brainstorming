@@ -1812,7 +1812,8 @@ def facilitator_decide(state: MeetingState) -> Command[Literal["ask_question", "
         "但不要讓同一人連續霸佔超過必要、也不要無意義地拖長會議。"
         "只輸出 JSON：{\"action\": \"present\" 或 \"end\", "
         "\"persona_id\": \"要選的人 id（action=present 時必填）\", "
-        "\"reason\": \"<=50字，你的判斷理由\"}"
+        "\"reason\": \"<=150字，你的判斷理由——這段話會直接被拿去給真人與會者看，"
+        "所以要講清楚具體根據（誰的異議、哪一點還沒解決），不要只是空泛通則\"}"
     )
     user = (
         f"與會者發言次數：\n{summary_block}\n\n"
@@ -1885,12 +1886,19 @@ def ask_question(state: MeetingState) -> dict:
     presenter = next(p for p in state["personas"] if p.get("id") == pid)
     proposal = _proposal_for_persona(state, pid)
     asked_so_far = len([q for q in state["human_qa_log"] if q["presenter_id"] == pid])
+    facilitator_log = state["facilitator_log"]
+    # facilitator_decide 剛選完這個人就 Command(goto="ask_question")，
+    # 所以這裡 log 最後一筆一定是「為什麼選這個人」的理由——之前這個理由
+    # 只寫進 events extra，真人要點開事件細節才看得到；使用者要求把它
+    # 直接曝光在提問點，人類才知道主持人憑什麼理由讓這個人發表。
+    facilitator_reason = facilitator_log[-1].get("reason") if facilitator_log else None
     payload = {
         "presenter_id": pid,
         "presenter_name": presenter.get("name"),
         "proposal_title": proposal.get("title"),
         "proposal_summary": proposal.get("summary"),
         "questions_asked_so_far": asked_so_far,
+        "facilitator_reason": facilitator_reason,
         "prompt": (
             f"{presenter.get('name')} 剛發表《{proposal.get('title')}》。"
             "要提問嗎？可連續問多題，輸入空字串／skip 結束提問進入互評。"
