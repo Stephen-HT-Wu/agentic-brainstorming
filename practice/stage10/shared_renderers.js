@@ -178,13 +178,17 @@ function renderExtraGeneric(action, extra) {
     case 'write_pov_hmw':
       return block('POV', `<p>${esc(extra.pov)}</p>`) + block('HMW', `<p>${esc(extra.hmw)}</p>`);
     case 'draft_proposal':
-      return (extra.bmc_missing && extra.bmc_missing.length)
-        ? block('BMC 缺漏欄位', ul(extra.bmc_missing))
-        : '<div class="detail-note">BMC 九宮格已通過完整性檢查（完整內容可在該 persona 的「發表」事件查看，或等會議跑完看回放頁）</div>';
+      // 使用者要求初稿一形成就看得到完整提案跟 BMC，不用等到 present 事件
+      // 或會議跑完看回放——extra.proposal 是 graph.py 端加的完整提案物件。
+      return (extra.bmc_missing && extra.bmc_missing.length ? block('BMC 缺漏欄位', ul(extra.bmc_missing)) : '') +
+        renderProposal(extra.proposal, '初稿');
     case 'refine':
+      // diff 回答「改了什麼」，完整提案回答「現在長怎樣」——兩者並陳，
+      // 不是只挑一個顯示。
       return kv('修正輪次', extra.round) + kv('embedding 位移', extra.embedding_distance) +
         kv('自評分數變化', `${extra.self_score_before} → ${extra.self_score_after}（Δ${extra.self_score_delta > 0 ? '+' : ''}${extra.self_score_delta}）`) +
-        block('具體改了什麼（跟分數並陳，不是只有數字）', extra.diff_text ? `<pre>${esc(extra.diff_text)}</pre>` : '');
+        block('具體改了什麼（跟分數並陳，不是只有數字）', extra.diff_text ? `<pre>${esc(extra.diff_text)}</pre>` : '') +
+        renderProposal(extra.proposal, `第 ${extra.round} 輪修正後的完整提案`);
     case 'homework_done':
       return kv('耗時', extra.elapsed_s ? extra.elapsed_s.toFixed(1) + ' 秒' : '');
     case 'facilitator_decide':
