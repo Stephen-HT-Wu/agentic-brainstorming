@@ -147,3 +147,70 @@ eCPM試驗」，這是真實測試反饋驅動範疇收斂的具體案例。
 編輯 context；單一原型（共創提案小組）＋4×1 三鏡檢核＋write_wisdom
 34 筆（含新 doc_type：co_created_proposal ×1、co_creation_turn ×3）
 全部正確；main() 新驗收區塊全數通過。
+
+## 第三次迭代（2026-07-13）：取消輪數上限／修正對比表沒更新的 bug／模擬使用者對照評分
+
+使用者一次提了三件事：
+
+1. **取消 `facilitator_decide` 的六輪硬上限**——只留預算上限
+   （`MAX_BUDGET_USD`）當唯一的強制收斂條件，讓討論能自然跑到
+   facilitator 自己判斷「已經充分」為止，不會湊巧到第 6 輪就被砍掉。
+   `MAX_ROUNDS` 常數跟所有引用處（facilitator prompt、驗收區塊的
+   `within_round_cap`）整個移除，不留死碼。真實跑測驗證：round 6 的
+   「end」決策理由是純粹的品質判斷（「四人皆已發言…邊際效益低，應
+   收斂結束討論」），不再是舊的「超過硬性上限（已發表 6/6 輪…）」
+   強制文字。
+
+2. **回放頁「六個可量化的差異」對比表沒更新的根因**：`compute_comparison()`
+   從「共創收斂」重構完之後**忘了跟著改**，`real_sources`／
+   `bmc_completeness` 還在用舊算法——取 `idea_pool_versions`（4 位
+   persona 收斂前個別提案）算平均/範圍，沒有反映真正的最終產出（單一
+   共創提案）。改成優先讀 `prototypes[0]['after']`（原型測試後的真正
+   定案），沒有就退回 `co_created_proposal`，兩者都沒有才是共創重構前
+   的舊 run，退回舊算法保持相容（`test_real_sources_falls_back_to_legacy_average_when_no_final_proposal`
+   鎖住這個相容路徑）。真實資料驗證：`agent_total` 從舊算法的
+   `1.5`（4 份平均）變成新算法的實際單一提案來源數 `3`，`bmc_completeness`
+   從 range（`9/9 ~ 9/9`）變成單一數字（`9/9`）。
+
+3. **模擬使用者對照評分**（回答使用者的核心問題：「編排 agents 是否
+   真的比直接問一次 LLM 更有性價比？」）——新函式
+   `evaluate_final_outputs_with_users()`：讓做功課階段訪談過的模擬
+   使用者（不是真人）分別對共創最終提案跟 baseline 各自獨立打
+   0-10 分＋意見。**刻意用「方案 A／方案 B」盲測命名**，不讓模擬
+   使用者知道哪個花了更多功夫做出來——這不是裝飾性的嚴謹，是真的
+   會影響結果：如果 prompt 洩漏身份，很難排除「這個比較用心」的
+   月暈效應污染評分。函式本身不是圖節點（跟 `run_baseline()` 一樣，
+   在 `main()` 裡直接呼叫、手動 `set_current_node()` 讓事件照樣能進
+   `events.jsonl`）。
+
+   拿到的真實分數會回頭餵進 `generate_final_verdict()` 的 prompt——
+   這是這次最重要的性質改變：**AI 的最終評語從「自己讀結構性數字寫
+   感想」變成「引用真實第三方評分」**，不再是自問自答。真實跑測的
+   評語第一句就是「分數是硬證據：模擬使用者給共創方案 5.5 分、
+   baseline 3.0 分，差距達 +2.5，且評分者事前不知道哪邊花了更多
+   力氣」——AI 真的把這組數字當成論證的起點，不是裝飾。
+
+   踩到一個真實 bug：第一版忘了在 `evaluate_final_outputs_with_users()`
+   裡呼叫 `set_current_node()`，導致事件的 `node` 欄位沿用
+   `run_baseline()` 留下的 `"baseline"`，即時畫面的拓樸圖新節點永遠
+   不會亮（`renderExtraGeneric()` 用 `action` 分派、不受影響，只有
+   拓樸圖的 `supervisorNodeFor(node)` 對應會壞掉）——加回
+   `set_current_node("evaluate_final_outputs")` 修正，這也是為什麼
+   `run_baseline()` 這類「不經過圖節點的函式要手動管理節點狀態」的
+   細節值得寫下來：呼叫序列裡上一個設的節點名稱會一直沿用，不會自動
+   歸零。
+
+   即時畫面/回放器：`user:{name}` 是新的角色前綴（模擬使用者評分，
+   不是提案的 persona），`roleDisplayName()`/`roleColor()`/`laneOrder()`
+   都要比照 `master:`/`baseline` 加專屬處理，不然泳道會顯示成
+   「user:陳小姐」這種不乾淨的字串。`user_evaluation_summary` 事件的
+   `extra` 刻意把完整的兩份提案（含 BMC）都放進去，讓使用者要的
+   「兩者平行呈現」不用點開多筆事件拼湊。
+
+真實跑測（2026-07-13，`--example-config`，總成本 $0.036）：兩位模擬
+使用者（陳小姐／王先生）都對兩個方案留下合法評分，`user_evaluation`
+正確存進 run JSON 與最終報告的新區塊；回放頁對比表六列數字全部反映
+新架構（不再是重構前忘了改的舊算法）；`generate_final_verdict()` 的
+輸出真的引用了 5.5/3.0 這組真實分數；`main()` 新增的
+`user_evaluation_ok` 驗收檢查通過。61 個離線測試（stage9/10/11）全數
+通過。

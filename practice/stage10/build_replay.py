@@ -51,20 +51,44 @@ def sum_display_cost(events: list) -> float:
 
 
 def compute_comparison(run_data: dict) -> dict:
-    """算出 PLAN.md 點名的六個維度，agent 端一律取 idea_pool_versions
-    （每位 persona 同儕互評後的最終版）算平均，不是只挑最好的那份。"""
+    """算出 PLAN.md 點名的六個維度。使用者要求改成共創收斂後，agent 端
+    只剩『一個』最終提案，不是 4 個候選——這裡原本沿用重構前的算法，取
+    idea_pool_versions（4 位 persona 同儕互評後、共創編輯前的個別版本）
+    算平均，對比表因此一直沒反映真正的最終產出，使用者回報「六個可量化
+    的差異未更新」就是這個根因。改成一律取真正的最終提案：優先用原型
+    測試後的版本（prototypes[0]['after']，最接近使用者實際驗證過的
+    定案），沒有就退回共創草稿本身；兩者都沒有才是共創重構前留下的舊
+    run 資料，退回舊算法保持相容、不讓歷史回放頁壞掉。"""
     idea_pool_versions = run_data.get("idea_pool_versions") or []
     baseline_proposal = run_data.get("baseline", {}).get("proposal") or {}
     baseline_metrics = run_data.get("baseline", {}).get("metrics") or {}
-
-    agent_proposals = [v["proposal_after"] for v in idea_pool_versions if v.get("proposal_after")]
-    n = len(agent_proposals) or 1
-
-    agent_source_counts = [len(p.get("sources") or []) for p in agent_proposals]
-    agent_bmc_filled = [_bmc_filled_count(p.get("bmc") or {}) for p in agent_proposals]
     co_creation_log = run_data.get("co_creation_log") or []
-    revision_count = len(idea_pool_versions) + len(co_creation_log) + len(run_data.get("prototypes") or [])
-    memory_refs_total = sum(len(p.get("memory_refs") or []) for p in agent_proposals)
+    prototypes = run_data.get("prototypes") or []
+
+    final_proposal = None
+    if prototypes and prototypes[0].get("after"):
+        final_proposal = prototypes[0]["after"]
+    elif run_data.get("co_created_proposal"):
+        final_proposal = run_data["co_created_proposal"]
+
+    if final_proposal:
+        agent_source_count = len(final_proposal.get("sources") or [])
+        agent_bmc_text = f"{_bmc_filled_count(final_proposal.get('bmc') or {})}/9"
+        memory_refs_total = len(final_proposal.get("memory_refs") or [])
+    else:
+        # 相容共創重構前的舊 run（只有 idea_pool_versions 裡 4 份個別
+        # 提案，沒有單一最終產出）——維持原本「取平均／範圍」的舊算法。
+        legacy_proposals = [v["proposal_after"] for v in idea_pool_versions if v.get("proposal_after")]
+        n = len(legacy_proposals) or 1
+        agent_source_count = round(sum(len(p.get("sources") or []) for p in legacy_proposals) / n, 2)
+        legacy_bmc_filled = [_bmc_filled_count(p.get("bmc") or {}) for p in legacy_proposals]
+        agent_bmc_text = (
+            f"{min(legacy_bmc_filled) if legacy_bmc_filled else 0}/9 ~ "
+            f"{max(legacy_bmc_filled) if legacy_bmc_filled else 0}/9"
+        )
+        memory_refs_total = sum(len(p.get("memory_refs") or []) for p in legacy_proposals)
+
+    revision_count = len(idea_pool_versions) + len(co_creation_log) + len(prototypes)
 
     # 使用者要求把「點子多樣性」（衡量多個最終提案彼此差異度，選拔框架下
     # 才有意義）換成「整合的跨領域觀點數」——現在只有一個共創提案，量
@@ -86,12 +110,11 @@ def compute_comparison(run_data: dict) -> dict:
         "real_sources": {
             "baseline": len(baseline_proposal.get("sources") or []),
             "baseline_verified": 0,  # baseline 沒有真實搜尋池，來源無法驗證是否真實存在
-            "agent_avg": round(sum(agent_source_counts) / n, 2),
-            "agent_total": sum(agent_source_counts),
+            "agent_total": agent_source_count,
         },
         "bmc_completeness": {
             "baseline": f"{_bmc_filled_count(baseline_proposal.get('bmc') or {})}/9",
-            "agent_all": f"{min(agent_bmc_filled) if agent_bmc_filled else 0}/9 ~ {max(agent_bmc_filled) if agent_bmc_filled else 0}/9",
+            "agent_all": agent_bmc_text,
         },
         "cross_domain_integration": {
             "baseline": "N/A（只有一人單獨生成，無跨領域整合）",
@@ -388,10 +411,10 @@ const USERS = __USERS_JSON__;
 function renderCompareTable() {
   const c = COMPARISON;
   const rows = [
-    ["真實搜尋依據", `${c.real_sources.baseline} 筆（模型可能編造，無法驗證）`, `平均 ${c.real_sources.agent_avg} 筆／份，來自真實搜尋結果`],
-    ["BMC 完整度", c.bmc_completeness.baseline, c.bmc_completeness.agent_all + "（每份皆通過結構驗證）"],
+    ["真實搜尋依據", `${c.real_sources.baseline} 筆（模型可能編造，無法驗證）`, `${c.real_sources.agent_total} 筆，來自真實搜尋結果`],
+    ["BMC 完整度", c.bmc_completeness.baseline, c.bmc_completeness.agent_all + "（通過結構驗證）"],
     ["整合的跨領域觀點數", c.cross_domain_integration.baseline, c.cross_domain_integration.agent],
-    ["被批判／測試後改良次數", `${c.revision_count.baseline}（從未被挑戰）`, `${c.revision_count.agent} 次（同儕互評 + 用戶測試雙重驅動）`],
+    ["被批判／測試後改良次數", `${c.revision_count.baseline}（從未被挑戰）`, `${c.revision_count.agent} 次（同儕互評 + 共創編輯 + 用戶測試驅動）`],
     ["跨場記憶引用", `${c.cross_round_memory.baseline}（無記憶，每次都是新對話）`, `${c.cross_round_memory.agent_actually_cited} 筆真實引用（命中 ${c.cross_round_memory.agent_recall_hits} 次）`],
     ["成本", `$${Number(c.cost.baseline).toFixed(4)}（一次呼叫）`, `$${Number(c.cost.agent_total).toFixed(4)}（完整流程：${c.cost.agent_persona_count} 位 persona + 大師 + 訪談 + 測試）`],
   ];

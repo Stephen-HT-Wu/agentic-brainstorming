@@ -97,7 +97,6 @@ EMBED_DIM = 256
 REFINE_ROUNDS = 2
 INTERVIEW_ROUNDS = 3
 
-MAX_ROUNDS = 6
 MAX_BUDGET_USD = 5.0
 
 RECALL_N_RESULTS = 3
@@ -1804,10 +1803,13 @@ def facilitator_decide(state: MeetingState) -> Command[Literal["ask_question", "
     presented_so_far = sum(1 for e in log if e["action"] == "present")
     budget_used = total_cost()
 
-    if presented_so_far >= MAX_ROUNDS or budget_used > MAX_BUDGET_USD:
+    # 使用者要求取消輪數硬上限——只保留預算上限當唯一的強制收斂條件，
+    # 讓討論可以自然跑到 facilitator 自己判斷「已經充分」為止，不會因為
+    # 湊巧到了第 6 輪就被砍掉。
+    if budget_used > MAX_BUDGET_USD:
         decision = {
             "round": round_no, "action": "end", "chosen_persona_id": None, "chosen_persona_name": None,
-            "reason": f"超過硬性上限（已發表 {presented_so_far}/{MAX_ROUNDS} 輪, cost=${budget_used:.3f}/${MAX_BUDGET_USD}），強制收斂",
+            "reason": f"超過預算上限（已發表 {presented_so_far} 輪, cost=${budget_used:.3f}/${MAX_BUDGET_USD}），強制收斂",
             "budget_used_usd": round(budget_used, 4), "forced": True,
         }
         emit_event("facilitator_decide", decision["reason"], role="facilitator", extra=decision)
@@ -1826,7 +1828,7 @@ def facilitator_decide(state: MeetingState) -> Command[Literal["ask_question", "
     system = (
         "你是這場腦力激盪會議的主持人（Facilitator）。任務：讓每個人在有限頻寬內"
         "均衡發言，並判斷討論是否已經充分、該收斂了。"
-        f"目前第 {round_no} 輪（硬上限 {MAX_ROUNDS} 輪），預算 ${budget_used:.3f}/${MAX_BUDGET_USD}。"
+        f"目前第 {round_no} 輪，預算 ${budget_used:.3f}/${MAX_BUDGET_USD}。"
         "規則：每個人至少要發表過一次才可以結束；如果某人的提案還有明顯沒解決的"
         "爭議（從最近的異議判斷），可以讓他『加輪』再發表一次接受更多意見，"
         "但不要讓同一人連續霸佔超過必要、也不要無意義地拖長會議。"
@@ -2301,6 +2303,95 @@ def run_baseline(topic: str, company: str) -> dict:
     return proposal
 
 
+def evaluate_final_outputs_with_users(
+    *, final_proposal: dict, baseline_proposal: dict, users: List[dict],
+) -> dict:
+    """使用者要求：這個 demo 要誠實回答「編排 agents 是否真的比直接問一次
+    LLM 更有性價比」——原本的 final_verdict 是 AI 自己讀結構性數字寫的
+    評語，終究是「AI 評 AI 自己做的東西」。這裡讓做功課階段訪談過的
+    模擬使用者（不是真人）分別對共創最終提案跟 baseline 各自給意見＋
+    0-10 分（使用者已確認：兩邊獨立評分，不是只給一個整體比較分數）。
+    刻意用「方案 A／方案 B」盲測命名，不讓模擬使用者知道哪個花了更多
+    功夫做出來——不然「這個比較努力」的印象分數會污染評分，違背
+    「誠實比對」的初衷。"""
+    # 跟 run_baseline() 一樣，這個函式在 main() 裡直接呼叫、不經過圖節點
+    # ——手動設定目前節點名稱，事件的 node 欄位才會正確標成
+    # "evaluate_final_outputs"，不會沿用呼叫序列裡上一個設定的
+    # "baseline"（run_baseline() 留下的），拓樸圖才對應得到正確的節點。
+    set_current_node("evaluate_final_outputs")
+    evaluations: List[dict] = []
+    for user in users:
+        role_token = _event_role.set(f"user:{user.get('name')}")
+        system = (
+            _user_system_prompt(user)
+            + "現在有兩個產品概念要給你看，請分別依你的角度誠實給意見"
+            "（喜歡/不喜歡/會不會用/有沒有疑慮），並各自打一個 0-10 分"
+            "（0=完全不會用，10=非常想要）。兩個概念哪個做起來比較花"
+            "功夫你不知道也不用管，只憑你自己的感受評分，不用客氣。"
+            "只輸出 JSON：{\"a_reaction\":\"<=80字\",\"a_score\":數字,"
+            "\"b_reaction\":\"<=80字\",\"b_score\":數字}"
+        )
+        user_prompt = (
+            f"方案 A：{final_proposal.get('title', '')}\n{final_proposal.get('summary', '')}\n"
+            f"BMC：{json.dumps(final_proposal.get('bmc'), ensure_ascii=False)}\n\n"
+            f"方案 B：{baseline_proposal.get('title', '')}\n{baseline_proposal.get('summary', '')}\n"
+            f"BMC：{json.dumps(baseline_proposal.get('bmc'), ensure_ascii=False)}"
+        )
+        try:
+            raw = call_llm(SMART_MODEL, system, user_prompt, max_tokens=400)
+            data = extract_json_object(raw)
+        finally:
+            _event_role.reset(role_token)
+        # 分數 clamp／保底沿用 score_proposal() 同款防呆：解析失敗不能讓
+        # 平均分被污染成 0，保底給中位數 5.0。
+        try:
+            agent_score = max(0.0, min(10.0, float(data.get("a_score"))))
+        except (TypeError, ValueError):
+            agent_score = 5.0
+        try:
+            baseline_score = max(0.0, min(10.0, float(data.get("b_score"))))
+        except (TypeError, ValueError):
+            baseline_score = 5.0
+        entry = {
+            "user_id": user.get("id"), "user_name": user.get("name"),
+            "agent_reaction": _safe_str(data.get("a_reaction")) or "（無反應）",
+            "agent_score": agent_score,
+            "baseline_reaction": _safe_str(data.get("b_reaction")) or "（無反應）",
+            "baseline_score": baseline_score,
+        }
+        evaluations.append(entry)
+        emit_event(
+            "evaluate_final_outputs",
+            f"{user.get('name')} 評分：共創方案 {agent_score} 分／baseline {baseline_score} 分",
+            role=f"user:{user.get('name')}", extra=entry,
+        )
+        print(f"  [evaluate:{user.get('name')}] 共創={agent_score} baseline={baseline_score}")
+
+    n = len(evaluations) or 1
+    agent_avg = round(sum(e["agent_score"] for e in evaluations) / n, 2)
+    baseline_avg = round(sum(e["baseline_score"] for e in evaluations) / n, 2)
+    summary = {
+        "evaluations": evaluations,
+        "agent_avg_score": agent_avg,
+        "baseline_avg_score": baseline_avg,
+        "score_delta": round(agent_avg - baseline_avg, 2),
+    }
+    # 這筆事件的 extra 把完整的兩份提案都放進去（不是只有分數）——使用者
+    # 要求即時畫面/回放器點開能「兩者平行呈現」，不用另外拼湊多筆事件
+    # 才看得到完整 BMC。
+    emit_event(
+        "user_evaluation_summary",
+        f"模擬使用者評分：共創方案平均 {agent_avg} 分／baseline 平均 {baseline_avg} 分"
+        f"（差距 {summary['score_delta']:+.2f}）",
+        extra={**summary, "final_proposal": final_proposal, "baseline_proposal": baseline_proposal},
+    )
+    print(
+        f"  [user_evaluation_summary] 共創平均={agent_avg} baseline平均={baseline_avg} "
+        f"差距={summary['score_delta']:+.2f}"
+    )
+    return summary
+
+
 def generate_final_verdict(
     *,
     topic: str,
@@ -2308,25 +2399,34 @@ def generate_final_verdict(
     baseline_proposal: dict,
     baseline_metrics: dict,
     diversity_after: dict,
+    user_evaluation: dict,
 ) -> str:
     """使用者要求：最後讓 AI 直接比較這場真實資料裡 agent 流程 vs baseline
     的優劣，不是只有結構性的數字對照表——這段話要有觀點、具體點名兩邊的
     優勢與代價，也要誠實承認 baseline 的價值（速度快、成本低），不是為了
     捧 agent 流程而失真。使用者把流程從「選拔 top-K」改成「共創收斂成一個
     提案」後，這裡也改成一對一比較共創提案 vs baseline，比原本「一個
-    baseline 對比多個候選」更乾淨。"""
+    baseline 對比多個候選」更乾淨。`user_evaluation` 是模擬使用者對兩邊
+    各自打的真實 0-10 分（`evaluate_final_outputs_with_users()`）——沒有
+    這個之前，這段評語只是「AI 自己讀結構性數字寫的感想」，等於自問自答；
+    餵進真實的第三方評分數字，才是使用者要的「誠實比對，不是自說自話」。"""
     system = (
         "你是一位產品策略顧問，要針對這場真實跑出來的資料，比較「多 agent 共創收斂」"
         "產出的最終提案，跟「直接問 LLM 一次」的 baseline 提案，寫一段有觀點的優劣分析。"
         "要具體點名兩邊各自的優勢與代價（不是空泛通則），並誠實承認 baseline 也有它的價值"
-        "（例如速度快、成本低、適合初步發散），不要為了捧多 agent 流程而失真。只輸出正文，"
-        "<=300字。"
+        "（例如速度快、成本低、適合初步發散），不要為了捧多 agent 流程而失真。"
+        "模擬使用者的真實評分是這場比較最重要的證據，務必在評語中明確引用這組分數。"
+        "只輸出正文，<=300字。"
     )
     user = (
         f"主題：{topic}\n\n"
         f"多 agent 流程共創出的最終提案：《{co_created_proposal.get('title', '')}》"
         f"{co_created_proposal.get('summary', '')}\n\n"
         f"Baseline 提案：《{baseline_proposal.get('title', '')}》{baseline_proposal.get('summary', '')}\n\n"
+        f"模擬使用者對照評分（0-10 分，各自獨立評分，不知道哪個花了更多功夫做出來）："
+        f"共創方案平均 {user_evaluation.get('agent_avg_score')} 分，"
+        f"baseline 平均 {user_evaluation.get('baseline_avg_score')} 分，"
+        f"差距 {user_evaluation.get('score_delta'):+.2f}\n\n"
         f"量化對照：4 位與會者收斂前彼此提案的多樣性（兩兩平均距離）="
         f"{diversity_after.get('avg_distance')}（顯示最終共創提案是真的整合了不同起點的"
         f"觀點，不是同一個想法換句話說），"
@@ -2410,6 +2510,7 @@ def save_outputs(
     baseline_metrics: dict,
     diversity_before: dict,
     diversity_after: dict,
+    user_evaluation: dict,
     final_verdict: str = "",
 ) -> Path:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -2445,6 +2546,9 @@ def save_outputs(
         "diversity_before_review": diversity_before,
         "diversity_after_review": diversity_after,
         "baseline": {"proposal": baseline_proposal, "metrics": baseline_metrics},
+        # 使用者要求「誠實比對」的核心證據：模擬使用者對共創方案跟
+        # baseline 各自獨立打的 0-10 分（不是 AI 自己讀數字寫感想）。
+        "user_evaluation": user_evaluation,
         "final_verdict": final_verdict,
         "total_cost_usd": round(total_cost(), 6),
     }
@@ -2478,6 +2582,7 @@ def build_final_report_markdown(
     baseline_metrics: dict,
     diversity_before: dict,
     diversity_after: dict,
+    user_evaluation: dict,
     final_verdict: str = "",
 ) -> str:
     id_to_name = {p.get("id"): p.get("name") for p in personas}
@@ -2571,6 +2676,29 @@ def build_final_report_markdown(
     L.append("## 提案多樣性\n")
     L.append(f"- 同儕互評前：{diversity_before['avg_distance']}")
     L.append(f"- 同儕互評後：{diversity_after['avg_distance']}\n")
+
+    L.append("## 模擬使用者評分對照（共創方案 vs baseline）\n")
+    L.append(
+        "做功課階段訪談過的模擬使用者，在不知道哪個方案花了更多功夫做出來"
+        "的情況下，分別對兩個方案給意見＋0-10 分：\n"
+    )
+    evaluations = user_evaluation.get("evaluations") or []
+    if evaluations:
+        L.append("| 使用者 | 共創方案評分 | 共創方案意見 | Baseline 評分 | Baseline 意見 |")
+        L.append("|---|---|---|---|---|")
+        for e in evaluations:
+            L.append(
+                f"| {e['user_name']} | {e['agent_score']} | {e['agent_reaction']} "
+                f"| {e['baseline_score']} | {e['baseline_reaction']} |"
+            )
+        L.append("")
+        L.append(
+            f"**平均分**：共創方案 {user_evaluation.get('agent_avg_score')} 分 vs "
+            f"baseline {user_evaluation.get('baseline_avg_score')} 分"
+            f"（差距 {user_evaluation.get('score_delta', 0):+.2f}）\n"
+        )
+    else:
+        L.append("（本場沒有模擬使用者評分紀錄）\n")
 
     if final_verdict:
         L.append("## AI 對照評語（agent 流程 vs baseline）\n")
@@ -2690,7 +2818,7 @@ def main() -> None:
 
     print(f"主題：{topic}")
     print(f"Thread／round_id：{thread_id}（checkpoint db：{CHECKPOINT_DB_PATH}）")
-    print(f"Persona 人數：{len(personas)}；模擬使用者人數：{len(users)}；硬上限：{MAX_ROUNDS} 輪／${MAX_BUDGET_USD}")
+    print(f"Persona 人數：{len(personas)}；模擬使用者人數：{len(users)}；預算硬上限：${MAX_BUDGET_USD}")
     print(f"Chroma 現有筆數：wisdom={wisdom_count_before}, interviews={interviews_count_before}")
     print(f"事件流：{EVENTS_PATH}")
     print()
@@ -2766,10 +2894,16 @@ def main() -> None:
     final_co_created_proposal = prototypes[0]["after"] if prototypes else co_created_proposal
 
     print()
+    print("=== 模擬使用者對照評分：共創方案 vs baseline ===")
+    user_evaluation = evaluate_final_outputs_with_users(
+        final_proposal=final_co_created_proposal, baseline_proposal=baseline_proposal, users=users,
+    )
+
+    print()
     print("=== AI 對照評語：agent 流程 vs baseline ===")
     final_verdict = generate_final_verdict(
         topic=topic, co_created_proposal=final_co_created_proposal, baseline_proposal=baseline_proposal,
-        baseline_metrics=baseline_metrics, diversity_after=diversity_after,
+        baseline_metrics=baseline_metrics, diversity_after=diversity_after, user_evaluation=user_evaluation,
     )
     print(f"  {final_verdict}")
 
@@ -2794,6 +2928,7 @@ def main() -> None:
         baseline_metrics=baseline_metrics,
         diversity_before=diversity_before,
         diversity_after=diversity_after,
+        user_evaluation=user_evaluation,
         final_verdict=final_verdict,
     )
 
@@ -2814,6 +2949,7 @@ def main() -> None:
         baseline_metrics=baseline_metrics,
         diversity_before=diversity_before,
         diversity_after=diversity_after,
+        user_evaluation=user_evaluation,
         final_verdict=final_verdict,
     )
     report_path = REPORT_DIR / f"{round_id}-final-report.md"
@@ -2849,7 +2985,6 @@ def main() -> None:
     presented_ids = {v["persona_id"] for v in idea_pool_versions}
     all_persona_ids = {p.get("id") for p in personas}
     everyone_presented = all_persona_ids <= presented_ids
-    within_round_cap = len(idea_pool_versions) <= MAX_ROUNDS
     reviews_shape_ok = all(
         len(r["agreements"]) == 3 and len(r["disagreements"]) == 3 and len(r["insights"]) == 3
         for r in review_log
@@ -2886,17 +3021,25 @@ def main() -> None:
         and "第一輪訪談（Empathize" in report_text
         and "第二輪訪談（Test" in report_text
         and "三鏡檢核" in report_text
+        and "模擬使用者評分對照" in report_text
+    )
+    # 每位模擬使用者都要真的留下一筆評分，且分數落在合法的 0-10 範圍內
+    # ——不是只檢查函式有沒有回傳東西。
+    user_evaluation_ok = len(user_evaluation.get("evaluations") or []) == len(users) and all(
+        0 <= e["agent_score"] <= 10 and 0 <= e["baseline_score"] <= 10
+        for e in user_evaluation.get("evaluations") or []
     )
 
     print(f"每人至少發表一次：{'是' if everyone_presented else '否'}（{len(presented_ids)}/{len(personas)}）")
-    print(f"發表總次數：{len(idea_pool_versions)}（硬上限 {MAX_ROUNDS}）：{'未超過' if within_round_cap else '超過！'}")
+    print(f"發表總次數：{len(idea_pool_versions)}（無輪數上限，只受預算約束）")
     print(f"互評每則恰好 3/3/3：{'是' if reviews_shape_ok else '否'}")
     print(f"三大師皆有點評：{'是' if masters_ok else '否'}")
     print(f"共創迴圈逐輪跑完（{len(co_creation_log)}/{len(personas) - 1} 輪，每輪都有貢獻說明）：{'是' if co_creation_ok else '否'}")
     print(f"共創提案的原型已寫出可開啟的 HTML：{'是' if prototypes_ok else '否'}")
     print(f"測試反應真的改變了最終版本（embed_dist>0 且有實際 diff）：{'是' if test_changed_version else '否'}")
     print(f"三鏡檢核格式不變量（{len(personas)}人×1個共創提案，每筆恰好3/3/3）：{'是' if three_lens_shape_ok else '否'}")
-    print(f"最終報告完整（含人類問答＋兩輪訪談記錄）：{'是' if report_complete else '否'}")
+    print(f"模擬使用者對兩個方案都留下合法評分（{len(user_evaluation.get('evaluations') or [])}/{len(users)}）：{'是' if user_evaluation_ok else '否'}")
+    print(f"最終報告完整（含人類問答＋兩輪訪談記錄＋使用者評分對照）：{'是' if report_complete else '否'}")
     print(f"提案多樣性：互評前 {diversity_before['avg_distance']} → 互評後 {diversity_after['avg_distance']}")
     print(f"總耗時：{wall_elapsed:.1f}s")
     print(f"已存檔：{out_path}")
@@ -2906,13 +3049,13 @@ def main() -> None:
     ok = (
         len(personas) >= 3
         and everyone_presented
-        and within_round_cap
         and reviews_shape_ok
         and masters_ok
         and co_creation_ok
         and prototypes_ok
         and test_changed_version
         and three_lens_shape_ok
+        and user_evaluation_ok
         and report_complete
         and total_cost() <= MAX_BUDGET_USD + 0.5  # prototype/test/three-lens 階段的花費不算進 facilitator 的預算控管
         and out_path.exists()

@@ -256,12 +256,17 @@ function roleColor(role) {
   if (role.startsWith('master:')) return '#9d7bff';
   if (role === 'baseline') return '#8a93a6';
   if (role === 'system') return '#5a6478';
+  // 使用者要求讓模擬使用者對共創方案/baseline 評分——這批事件的 role
+  // 是 "user:{name}"，用固定色跟 persona 泳道區分開（這是被訪談/評分
+  // 的模擬使用者，不是提案的 persona），比照 baseline/system 的做法。
+  if (role.startsWith('user:')) return '#3ed9c2';
   if (!(role in roleColorCache)) roleColorCache[role] = ROLE_COLOR_PALETTE[Object.keys(roleColorCache).length % ROLE_COLOR_PALETTE.length];
   return roleColorCache[role];
 }
 function roleDisplayName(role) {
   if (role.startsWith('persona:')) return role.slice('persona:'.length);
   if (role.startsWith('master:')) return role.slice('master:'.length);
+  if (role.startsWith('user:')) return role.slice('user:'.length);
   return role;
 }
 
@@ -439,7 +444,8 @@ document.getElementById('btnStartRun').addEventListener('click', async () => {
 
 // ---------- 即時畫面 ----------
 const TOPO_NODES = ["homework_worker", "facilitator_decide", "ask_question", "answer_question",
-  "run_peer_review", "run_masters", "co_create_turn", "run_prototype_test", "run_three_lens_check", "write_wisdom"];
+  "run_peer_review", "run_masters", "co_create_turn", "run_prototype_test", "run_three_lens_check",
+  "write_wisdom", "evaluate_final_outputs"];
 
 // events.jsonl 的 `node` 欄位是 instrument() 包住的「實際跑的那個函式」名字，
 // 對巢狀子圖（homework_worker／run_peer_review／run_masters／
@@ -463,6 +469,11 @@ const NODE_TO_SUPERVISOR = {
   three_lens_check: "run_three_lens_check", run_three_lens_check: "run_three_lens_check",
   facilitator_decide: "facilitator_decide", ask_question: "ask_question", answer_question: "answer_question",
   write_wisdom: "write_wisdom",
+  // run_baseline() 跟這兩個一樣，是在 main() 裡、不經過圖節點直接呼叫的
+  // 一般函式（透過手動 set_current_node() 讓事件照樣能進 events.jsonl），
+  // 但 "baseline" 本身沒有對應的拓樸節點；evaluate_final_outputs 是
+  // 使用者要求新增的模擬使用者對照評分階段，給它自己的拓樸節點。
+  evaluate_final_outputs: "evaluate_final_outputs", user_evaluation_summary: "evaluate_final_outputs",
 };
 function supervisorNodeFor(node) { return NODE_TO_SUPERVISOR[node] || null; }
 
@@ -517,6 +528,9 @@ function laneOrder(role) {
   if (role === 'system') return 1;
   if (role === 'facilitator') return 2;
   if (role.startsWith('master:')) return 3;
+  // user: 泳道（模擬使用者對共創方案/baseline 的評分）排在 baseline
+  // 附近——兩者都是「最後對照」相關的角色，排在一起方便閱讀。
+  if (role.startsWith('user:')) return 3.5;
   return 4;
 }
 

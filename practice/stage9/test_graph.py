@@ -97,14 +97,37 @@ class FinalReportMarkdownTests(unittest.TestCase):
             baseline_metrics={"real_citations": 0, "bmc_filled": 9, "cost_usd": 0.001},
             diversity_before={"avg_distance": 0.3},
             diversity_after={"avg_distance": 0.25},
+            user_evaluation={
+                "evaluations": [
+                    {"user_id": "u1", "user_name": "U1", "agent_reaction": "喜歡共創方案",
+                     "agent_score": 8.0, "baseline_reaction": "還好", "baseline_score": 5.0},
+                ],
+                "agent_avg_score": 8.0, "baseline_avg_score": 5.0, "score_delta": 3.0,
+            },
         )
         kwargs.update(overrides)
         return kwargs
 
     def test_report_contains_all_required_sections(self):
         report = graph.build_final_report_markdown(**self._base_kwargs())
-        for marker in ("人類提問記錄", "第一輪訪談（Empathize", "第二輪訪談（Test", "三鏡檢核", "大師點評", "共創歷程", "共創最終提案", "Baseline 對照"):
+        for marker in (
+            "人類提問記錄", "第一輪訪談（Empathize", "第二輪訪談（Test", "三鏡檢核",
+            "大師點評", "共創歷程", "共創最終提案", "Baseline 對照", "模擬使用者評分對照",
+        ):
             self.assertIn(marker, report)
+
+    def test_report_includes_user_evaluation_table_and_averages(self):
+        report = graph.build_final_report_markdown(**self._base_kwargs())
+        self.assertIn("喜歡共創方案", report)
+        self.assertIn("8.0", report)
+        self.assertIn("5.0", report)
+        self.assertIn("+3.00", report)  # score_delta 格式化成帶正負號兩位小數
+
+    def test_report_handles_no_user_evaluations_gracefully(self):
+        report = graph.build_final_report_markdown(**self._base_kwargs(
+            user_evaluation={"evaluations": [], "agent_avg_score": 0, "baseline_avg_score": 0, "score_delta": 0},
+        ))
+        self.assertIn("沒有模擬使用者評分紀錄", report)
 
     def test_report_includes_co_creation_turn_detail(self):
         report = graph.build_final_report_markdown(**self._base_kwargs())
@@ -269,6 +292,103 @@ class RunPrototypeTestSingleProposalTests(unittest.TestCase):
         self.assertEqual(items[0]["proposal"]["title"], "共創最終提案")
         self.assertEqual(items[0]["persona"]["id"], "co_created")
         self.assertNotIn(items[0]["persona"]["id"], {p["id"] for p in PERSONAS})
+
+
+class EvaluateFinalOutputsWithUsersTests(unittest.TestCase):
+    """使用者要求「誠實比對」的核心資料來源：模擬使用者對共創方案跟
+    baseline 各自獨立打分。"""
+
+    USERS = [
+        {"id": "u1", "name": "陳小姐", "age": 32, "context": "通勤族", "pain_points": [], "tone": ""},
+        {"id": "u2", "name": "王先生", "age": 45, "context": "家長", "pain_points": [], "tone": ""},
+    ]
+
+    def _proposal(self, title: str) -> dict:
+        return {"title": title, "summary": "s", "bmc": {k: "x" for k in graph.BMC_KEYS}}
+
+    def test_prompt_uses_blind_labels_not_agent_or_baseline(self):
+        # 使用者要求盲測命名，不能讓模擬使用者從 prompt 內容看出哪個是
+        # 花更多功夫做出來的——鎖住 user prompt 真的用「方案 A/方案 B」，
+        # 不含 "agent"、"baseline"、"共創" 這類會洩漏身份的字眼。
+        captured_prompts = []
+
+        def fake_call_llm(model, system, user, max_tokens=400):
+            captured_prompts.append(user)
+            return '{"a_score": 8, "a_reaction": "喜歡", "b_score": 4, "b_reaction": "普通"}'
+
+        with mock.patch.object(graph, "call_llm", side_effect=fake_call_llm), \
+             mock.patch.object(graph, "emit_event"):
+            graph.evaluate_final_outputs_with_users(
+                final_proposal=self._proposal("查證電子報"), baseline_proposal=self._proposal("新聞摘要卡"),
+                users=self.USERS[:1],
+            )
+        prompt = captured_prompts[0]
+        self.assertIn("方案 A", prompt)
+        self.assertIn("方案 B", prompt)
+        self.assertNotIn("agent", prompt.lower())
+        self.assertNotIn("baseline", prompt.lower())
+        self.assertNotIn("共創", prompt)
+
+    def test_averages_scores_across_multiple_users(self):
+        responses = iter([
+            '{"a_score": 8, "a_reaction": "r1a", "b_score": 4, "b_reaction": "r1b"}',
+            '{"a_score": 6, "a_reaction": "r2a", "b_score": 2, "b_reaction": "r2b"}',
+        ])
+        with mock.patch.object(graph, "call_llm", side_effect=lambda *a, **k: next(responses)), \
+             mock.patch.object(graph, "emit_event"):
+            summary = graph.evaluate_final_outputs_with_users(
+                final_proposal=self._proposal("共創提案"), baseline_proposal=self._proposal("baseline提案"),
+                users=self.USERS,
+            )
+        self.assertEqual(summary["agent_avg_score"], 7.0)  # (8+6)/2
+        self.assertEqual(summary["baseline_avg_score"], 3.0)  # (4+2)/2
+        self.assertEqual(summary["score_delta"], 4.0)
+        self.assertEqual(len(summary["evaluations"]), 2)
+
+    def test_malformed_score_falls_back_to_midpoint_not_zero(self):
+        # 解析失敗不能讓平均分被污染成 0——沿用 score_proposal() 同款
+        # 防呆，保底給中位數 5.0。
+        with mock.patch.object(graph, "call_llm", return_value='{"a_reaction": "x", "b_reaction": "y"}'), \
+             mock.patch.object(graph, "emit_event"):
+            summary = graph.evaluate_final_outputs_with_users(
+                final_proposal=self._proposal("共創提案"), baseline_proposal=self._proposal("baseline提案"),
+                users=self.USERS[:1],
+            )
+        self.assertEqual(summary["evaluations"][0]["agent_score"], 5.0)
+        self.assertEqual(summary["evaluations"][0]["baseline_score"], 5.0)
+
+    def test_score_clamped_to_0_10_range(self):
+        with mock.patch.object(graph, "call_llm", return_value='{"a_score": 99, "b_score": -5}'), \
+             mock.patch.object(graph, "emit_event"):
+            summary = graph.evaluate_final_outputs_with_users(
+                final_proposal=self._proposal("共創提案"), baseline_proposal=self._proposal("baseline提案"),
+                users=self.USERS[:1],
+            )
+        self.assertEqual(summary["evaluations"][0]["agent_score"], 10.0)
+        self.assertEqual(summary["evaluations"][0]["baseline_score"], 0.0)
+
+
+class GenerateFinalVerdictCitesUserEvaluationTests(unittest.TestCase):
+    def test_verdict_prompt_includes_real_user_scores(self):
+        captured = {}
+
+        def fake_call_llm(model, system, user, max_tokens=900):
+            captured["user"] = user
+            return "評語內容"
+
+        with mock.patch.object(graph, "call_llm", side_effect=fake_call_llm), \
+             mock.patch.object(graph, "emit_event"):
+            graph.generate_final_verdict(
+                topic="T",
+                co_created_proposal={"title": "共創", "summary": "s"},
+                baseline_proposal={"title": "baseline", "summary": "s"},
+                baseline_metrics={"real_citations": 0, "cost_usd": 0.01},
+                diversity_after={"avg_distance": 0.3},
+                user_evaluation={"agent_avg_score": 7.5, "baseline_avg_score": 4.2, "score_delta": 3.3},
+            )
+        self.assertIn("7.5", captured["user"])
+        self.assertIn("4.2", captured["user"])
+        self.assertIn("+3.30", captured["user"])
 
 
 if __name__ == "__main__":

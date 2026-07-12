@@ -56,11 +56,42 @@ class ComputeComparisonTests(unittest.TestCase):
         base.update(overrides)
         return base
 
-    def test_real_sources_averages_across_agent_proposals(self):
+    def test_real_sources_falls_back_to_legacy_average_when_no_final_proposal(self):
+        # fixture 的 prototypes[0] 沒有 "after"，也沒有 co_created_proposal
+        # ——這是共創重構前的舊 run 資料形狀，要退回舊算法（取
+        # idea_pool_versions 平均），不能直接爆掉或回傳假資料。
         c = br.compute_comparison(self._run_data())
-        self.assertEqual(c["real_sources"]["agent_avg"], 1.5)  # (2+1)/2
-        self.assertEqual(c["real_sources"]["agent_total"], 3)
+        self.assertEqual(c["real_sources"]["agent_total"], 1.5)  # (2+1)/2
         self.assertEqual(c["real_sources"]["baseline"], 1)
+
+    def test_real_sources_uses_single_final_proposal_when_available(self):
+        # 使用者回報「六個可量化的差異未更新」的根因：改成共創收斂後，
+        # agent 端應該只看『一個』真正的最終提案（原型測試後版本），不是
+        # 4 份共創編輯前的個別提案取平均——這裡鎖住新行為。
+        c = br.compute_comparison(self._run_data(prototypes=[{
+            "persona_id": "co_created",
+            "after": {
+                "sources": [{"url": "u1"}, {"url": "u2"}, {"url": "u3"}],
+                "bmc": {k: "x" for k in BMC_KEYS},
+                "memory_refs": ["m1"],
+            },
+        }]))
+        self.assertEqual(c["real_sources"]["agent_total"], 3)
+        self.assertEqual(c["bmc_completeness"]["agent_all"], "9/9")
+        self.assertEqual(c["cross_round_memory"]["agent_actually_cited"], 1)
+
+    def test_real_sources_uses_co_created_proposal_when_no_prototype_yet(self):
+        # 原型測試階段還沒跑完（例如即時畫面還在進行中）時，退回共創草稿
+        # 本身，不是等到有 prototypes 才顯示資料。
+        c = br.compute_comparison(self._run_data(
+            prototypes=[],
+            co_created_proposal={
+                "sources": [{"url": "u1"}],
+                "bmc": {k: "x" for k in BMC_KEYS},
+                "memory_refs": [],
+            },
+        ))
+        self.assertEqual(c["real_sources"]["agent_total"], 1)
 
     def test_revision_count_sums_versions_and_prototypes(self):
         c = br.compute_comparison(self._run_data())
@@ -92,7 +123,7 @@ class ComputeComparisonTests(unittest.TestCase):
 
     def test_handles_zero_agent_proposals_without_crashing(self):
         c = br.compute_comparison(self._run_data(idea_pool_versions=[]))
-        self.assertEqual(c["real_sources"]["agent_avg"], 0)
+        self.assertEqual(c["real_sources"]["agent_total"], 0)
 
 
 class SumDisplayCostTests(unittest.TestCase):

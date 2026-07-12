@@ -242,6 +242,23 @@ function renderExtraGeneric(action, extra) {
       return block('👍 正面', ul(extra.positive)) + block('👎 負面', ul(extra.negative)) + block('💡 洞見', ul(extra.insight));
     case 'human_qa':
       return kv('提問者', extra.asked_by) + block('問題', extra.question ? `<p>${esc(extra.question)}</p>` : '') + block('回答', extra.answer ? `<p>${esc(extra.answer)}</p>` : '');
+    case 'evaluate_final_outputs':
+      // 使用者要求讓模擬使用者對共創方案跟 baseline 各自獨立給意見＋
+      // 0-10 分——這裡是單一使用者的評分明細，並陳兩邊不用切換頁面比較。
+      return `<div class="detail-block"><div class="detail-block-title">共創方案（${esc(extra.agent_score)} 分）</div><p>${esc(extra.agent_reaction)}</p></div>` +
+        `<div class="detail-block"><div class="detail-block-title">Baseline（${esc(extra.baseline_score)} 分）</div><p>${esc(extra.baseline_reaction)}</p></div>`;
+    case 'user_evaluation_summary':
+      // 使用者要求「兩者平行呈現」——這筆事件的 extra 帶了完整的兩份
+      // 提案（含 BMC），用既有 renderProposal() 並排顯示，不用另外拼湊
+      // 多筆事件才看得到完整內容。
+      return kv('共創方案平均分', extra.agent_avg_score) + kv('Baseline 平均分', extra.baseline_avg_score) +
+        kv('差距', extra.score_delta != null ? (extra.score_delta > 0 ? '+' : '') + extra.score_delta : '') +
+        block('各使用者評分明細', (extra.evaluations || []).map(e =>
+          `<div class="quote"><b>${esc(e.user_name)}</b> — 共創 ${esc(e.agent_score)} 分／Baseline ${esc(e.baseline_score)} 分<br>` +
+          `共創：${esc(e.agent_reaction)}<br>Baseline：${esc(e.baseline_reaction)}</div>`
+        ).join('')) +
+        renderProposal(extra.final_proposal, '共創最終提案') +
+        renderProposal(extra.baseline_proposal, 'Baseline 提案', { unverified: true });
     case 'generate_final_verdict':
       return block('AI 對照評語（agent 流程 vs baseline）', extra.verdict ? `<p>${esc(extra.verdict)}</p>` : '');
     default:
