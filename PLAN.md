@@ -143,3 +143,23 @@ embedding 去重、平行化+壓縮、模型分級、可觀測性。本專案刻
 | 10. Demo 層 | 價值展示與對照實驗 | 單檔 HTML 回放器（讀 `events.jsonl` 播放會議實況）+ baseline vs 會議的 side-by-side 對比報告 + `DEMO.md` 導覽腳本 | 不懂技術的人看 15 分鐘 demo 能說出 agent 與「直接問 ChatGPT」的至少 3 個本質差異；回放器零依賴、雙擊即開 |
 
 **建議**：每個階段結束開一個 git commit/tag（例如 `stage-1-homework`），方便回頭比較架構演進的差異。
+
+## 未來構想（尚未排入 stage，先記著）
+
+- **EDD（evaluation-driven design）評估框架**：目前每次改 prompt／模型／
+  `max_tokens`（例如把部分節點從 Haiku 升級成 Sonnet 5、放寬幾個節點的
+  token 上限），都是跑一場真實會議、憑感覺讀輸出判斷有沒有變好，沒有
+  系統化的量化訊號。構想：
+  - 挑 1-2 個常改的節點（例如 `give_feedback`、`master_critique`）先做
+  - 拿**已經存在**的真實 `events.jsonl` 裡的輸入（persona + 提案）當固定
+    測試集，不用重新花錢生新資料
+  - 寫一個 LLM-as-judge，rubric 直接照抄這些節點 prompt 裡已經有的品質
+    要求（例如很多 prompt 都寫「不要空泛通則」——這句話本身就是現成的
+    具體度評分標準）
+  - 每次改 prompt/模型/token 上限，跑一次這個小 eval，看分數有沒有掉，
+    取代現在「跑一場、憑感覺讀」的做法
+  - 已知限制：LLM 評 LLM 有已知偏誤，小樣本 eval 的分數本身雜訊也不小，
+    統計上不見得能下定論——這個專案流量低，不確定值不值得建置一整套；
+    但作為「vibe coding 改完怎麼知道有沒有變好」這個一直卡住的問題，
+    比正式導入 TDD 更貼合這個專案的痛點，也算是這系列練習「每個 stage
+    學一個新概念」精神可以拿來練的下一個題目
