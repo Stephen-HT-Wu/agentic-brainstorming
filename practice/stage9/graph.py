@@ -564,7 +564,7 @@ def synthesize(state: HomeworkState) -> dict:
         f"搜尋素材：\n{bullet}\n\n"
         "請輸出：1) 市場／競品觀察 2) 對自家有利的切入點 3) 風險與未知。"
     )
-    brief = call_llm(CHEAP_MODEL, system, user, max_tokens=1200)
+    brief = call_llm(CHEAP_MODEL, system, user, max_tokens=2000)
     emit_event("synthesize", f"彙整 brief {len(brief)} 字，素材 {len(items)} 筆，跨輪記憶 {len(memory)} 筆")
     return {"research_brief": brief}
 
@@ -676,7 +676,7 @@ def extract_insights(state: HomeworkState) -> dict:
         "最多 5 則，每則必須具體可回溯到某位受訪者說的話，不要空泛通則。"
     )
     user = f"完整逐字稿：\n{lines}"
-    raw = call_llm(CHEAP_MODEL, system, user, max_tokens=800)
+    raw = call_llm(CHEAP_MODEL, system, user, max_tokens=1200)
     data = extract_json_object(raw)
     if not data:
         data = extract_json_object(repair_json_text(raw))
@@ -702,7 +702,7 @@ def write_pov_hmw(state: HomeworkState) -> dict:
         "兩者都要具體對應到下面列出的洞見，不要寫空泛通則。"
     )
     user = f"洞見清單：\n{insights_block}"
-    raw = call_llm(CHEAP_MODEL, system, user, max_tokens=500)
+    raw = call_llm(CHEAP_MODEL, system, user, max_tokens=900)
     data = extract_json_object(raw)
     pov = _safe_str(data.get("pov"))
     hmw = _safe_str(data.get("hmw"))
@@ -1916,7 +1916,7 @@ def answer_question(state: MeetingState) -> dict:
         f"人類提問：{question}"
     )
     try:
-        answer = call_llm(CHEAP_MODEL, system, user, max_tokens=400).strip()
+        answer = call_llm(CHEAP_MODEL, system, user, max_tokens=800).strip()
     finally:
         _event_role.reset(role_token)
     qa_entry = {
