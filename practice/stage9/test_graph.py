@@ -10,6 +10,16 @@ PERSONAS = [
 ]
 
 
+def _valid_bmc(text="x"):
+    """BMC 量化後「收益流」「成本結構」是結構化物件，不是純字串——
+    測試 fixture 統一用這個 helper 產生合法 BMC，不用每處各自處理兩種
+    不同的欄位形狀。"""
+    bmc = {k: text for k in graph.BMC_KEYS}
+    for k in graph.QUANTIFIED_BMC_KEYS:
+        bmc[k] = {"narrative": text, "monthly_estimate_twd": 1000, "basis": "測試假設"}
+    return bmc
+
+
 class ThreeLensFanOutTests(unittest.TestCase):
     def test_fan_out_covers_every_persona_times_every_top_k_proposal_including_self(self):
         top_k_proposals = {"a": {"title": "TA"}, "b": {"title": "TB"}, "c": {"title": "TC"}}
@@ -85,7 +95,7 @@ class FinalReportMarkdownTests(unittest.TestCase):
             ],
             prototypes=[{
                 "persona_id": "a", "persona_name": "A",
-                "after": {"title": "新標題", "summary": "新摘要", "bmc": {k: "x" for k in graph.BMC_KEYS}},
+                "after": {"title": "新標題", "summary": "新摘要", "bmc": _valid_bmc("x")},
                 "html_path": "/tmp/a.html", "revision_note": "微調", "embedding_distance": 0.2,
                 "reactions": [{"user_name": "U1", "reaction": "還可以"}],
             }],
@@ -104,6 +114,13 @@ class FinalReportMarkdownTests(unittest.TestCase):
                 ],
                 "agent_avg_score": 8.0, "baseline_avg_score": 5.0, "score_delta": 3.0,
             },
+            problem_analysis={
+                "five_forces": {"新進入者威脅": "低", "替代品威脅": "中", "顧客議價力": "高",
+                                 "供應商議價力": "低", "現有競爭者強度": "中"},
+                "trend_analysis": "短影音消費持續成長。",
+                "problem_statement": "如何在通勤情境下提升互動率。",
+                "used_fallback_users": False,
+            },
         )
         kwargs.update(overrides)
         return kwargs
@@ -111,7 +128,7 @@ class FinalReportMarkdownTests(unittest.TestCase):
     def test_report_contains_all_required_sections(self):
         report = graph.build_final_report_markdown(**self._base_kwargs())
         for marker in (
-            "人類提問記錄", "第一輪訪談（Empathize", "第二輪訪談（Test", "三鏡檢核",
+            "問題定義", "人類提問記錄", "第一輪訪談（Empathize", "第二輪訪談（Test", "三鏡檢核",
             "大師點評", "共創歷程", "共創最終提案", "Baseline 對照", "模擬使用者評分對照",
         ):
             self.assertIn(marker, report)
@@ -166,7 +183,7 @@ class RegressionCarryoverTests(unittest.TestCase):
         self.assertEqual(cmd.goto, "run_masters")
 
     def test_bmc_structural_invariant_still_enforced(self):
-        valid = {k: "內容" for k in graph.BMC_KEYS}
+        valid = _valid_bmc("內容")
         self.assertEqual(graph.assert_bmc_complete({"bmc": valid}), [])
         self.assertTrue(graph.assert_bmc_complete({"bmc": dict(valid, 額外="不允許")}))
 
@@ -177,7 +194,7 @@ class RunMastersSeedSelectionTests(unittest.TestCase):
     present），不是固定的 personas[0]，這裡鎖住這個行為。"""
 
     def _proposal(self, title: str) -> dict:
-        return {"title": title, "summary": "s", "bmc": {k: "x" for k in graph.BMC_KEYS}}
+        return {"title": title, "summary": "s", "bmc": _valid_bmc("x")}
 
     def test_seed_comes_from_last_present_decision_not_persona_order(self):
         state = {
@@ -220,7 +237,7 @@ class CoCreateTurnTests(unittest.TestCase):
             "personas": PERSONAS,
             "co_creation_order": ["b", "c", "d"],
             "co_creation_turn_index": 0,
-            "shared_draft": {"title": "種子草稿", "summary": "s", "bmc": {k: "x" for k in graph.BMC_KEYS}},
+            "shared_draft": {"title": "種子草稿", "summary": "s", "bmc": _valid_bmc("x")},
             "master_critiques": [{"master_name": "技術大師", "critique": "還不錯"}],
             "persona_results": [
                 {"persona": {"id": "b", "name": "B"}, "proposal": {"title": "B原本的提案"},
@@ -234,7 +251,7 @@ class CoCreateTurnTests(unittest.TestCase):
         state = self._state()
         mock_response = graph.json.dumps({
             "title": "更新後標題", "summary": "更新後摘要",
-            "bmc": {k: "y" for k in graph.BMC_KEYS},
+            "bmc": _valid_bmc("y"),
             "self_score": 8, "insight_refs": ["i1"], "memory_refs": [],
             "built_on_persona_ids": ["a", "not_a_real_persona"],
             "contribution_note": "補了 X",
@@ -253,7 +270,7 @@ class CoCreateTurnTests(unittest.TestCase):
     def test_insight_refs_get_persona_id_prefix_to_avoid_collision(self):
         state = self._state()
         mock_response = graph.json.dumps({
-            "title": "T", "summary": "s", "bmc": {k: "y" for k in graph.BMC_KEYS},
+            "title": "T", "summary": "s", "bmc": _valid_bmc("y"),
             "insight_refs": ["i1"], "memory_refs": [], "built_on_persona_ids": [],
         })
         with mock.patch.object(graph, "call_llm", return_value=mock_response), \
@@ -304,7 +321,7 @@ class EvaluateFinalOutputsWithUsersTests(unittest.TestCase):
     ]
 
     def _proposal(self, title: str) -> dict:
-        return {"title": title, "summary": "s", "bmc": {k: "x" for k in graph.BMC_KEYS}}
+        return {"title": title, "summary": "s", "bmc": _valid_bmc("x")}
 
     def test_prompt_uses_blind_labels_not_agent_or_baseline(self):
         # 使用者要求盲測命名，不能讓模擬使用者從 prompt 內容看出哪個是
@@ -389,6 +406,173 @@ class GenerateFinalVerdictCitesUserEvaluationTests(unittest.TestCase):
         self.assertIn("7.5", captured["user"])
         self.assertIn("4.2", captured["user"])
         self.assertIn("+3.30", captured["user"])
+
+
+class BmcQuantificationTests(unittest.TestCase):
+    """使用者要求「收益流」「成本結構」要真的量化才有用——這裡鎖住結構
+    驗證／合併／損益計算三個純函式的行為。"""
+
+    def _quant_cell(self, narrative="敘述", amount=1000, basis="依據"):
+        return {"narrative": narrative, "monthly_estimate_twd": amount, "basis": basis}
+
+    def test_assert_bmc_complete_rejects_plain_string_for_quant_keys(self):
+        bmc = _valid_bmc("x")
+        bmc["收益流"] = "純文字，舊格式"  # 量化前的舊格式，現在應該被拒絕
+        issues = graph.assert_bmc_complete({"bmc": bmc})
+        self.assertIn("缺漏或無效:收益流", issues)
+
+    def test_assert_bmc_complete_accepts_valid_quant_object(self):
+        bmc = _valid_bmc("x")
+        self.assertEqual(graph.assert_bmc_complete({"bmc": bmc}), [])
+
+    def test_assert_bmc_complete_rejects_missing_monthly_estimate(self):
+        bmc = _valid_bmc("x")
+        bmc["成本結構"] = {"narrative": "有敘述但沒有數字", "basis": "b"}
+        issues = graph.assert_bmc_complete({"bmc": bmc})
+        self.assertIn("缺漏或無效:成本結構", issues)
+
+    def test_merge_bmc_keeps_valid_candidate_quant_cell(self):
+        prev = _valid_bmc("舊")
+        candidate = _valid_bmc("舊")
+        candidate["收益流"] = self._quant_cell("新的收益流敘述", 5000, "新依據")
+        merged = graph._merge_bmc(candidate, prev)
+        self.assertEqual(merged["收益流"]["monthly_estimate_twd"], 5000)
+        self.assertEqual(merged["收益流"]["narrative"], "新的收益流敘述")
+
+    def test_merge_bmc_falls_back_to_prev_when_candidate_invalid(self):
+        prev = _valid_bmc("舊")
+        candidate = _valid_bmc("舊")
+        candidate["成本結構"] = "模型退化成純文字"  # 不合法的候選值
+        merged = graph._merge_bmc(candidate, prev)
+        self.assertEqual(merged["成本結構"], prev["成本結構"])
+
+    def test_merge_bmc_zeroed_placeholder_when_no_prev_either(self):
+        candidate = {}
+        merged = graph._merge_bmc(candidate, {})
+        self.assertEqual(merged["收益流"], {"narrative": "", "monthly_estimate_twd": 0.0, "basis": ""})
+
+    def test_compute_unit_economics_viable_when_revenue_exceeds_cost(self):
+        bmc = _valid_bmc("x")
+        bmc["收益流"]["monthly_estimate_twd"] = 5000
+        bmc["成本結構"]["monthly_estimate_twd"] = 2000
+        ue = graph.compute_unit_economics(bmc)
+        self.assertEqual(ue["monthly_margin_twd"], 3000)
+        self.assertTrue(ue["is_viable"])
+
+    def test_compute_unit_economics_not_viable_when_cost_exceeds_revenue(self):
+        bmc = _valid_bmc("x")
+        bmc["收益流"]["monthly_estimate_twd"] = 1000
+        bmc["成本結構"]["monthly_estimate_twd"] = 4000
+        ue = graph.compute_unit_economics(bmc)
+        self.assertEqual(ue["monthly_margin_twd"], -3000)
+        self.assertFalse(ue["is_viable"])
+
+
+class ViabilityNudgeTests(unittest.TestCase):
+    """使用者確認的「軟性引導」：修正迴圈的 prompt 要看得到上一版損益，
+    不划算時要有明確的「認真考慮換方向」提示，不是新增一個獨立關卡節點。"""
+
+    def test_nudge_text_signals_pivot_when_not_viable(self):
+        bmc = _valid_bmc("x")
+        bmc["收益流"]["monthly_estimate_twd"] = 100
+        bmc["成本結構"]["monthly_estimate_twd"] = 9000
+        note = graph._viability_nudge({"bmc": bmc})
+        self.assertIn("不划算", note)
+        self.assertIn("換一個核心價值主張", note)
+
+    def test_nudge_text_encourages_deepening_when_viable(self):
+        bmc = _valid_bmc("x")
+        bmc["收益流"]["monthly_estimate_twd"] = 9000
+        bmc["成本結構"]["monthly_estimate_twd"] = 100
+        note = graph._viability_nudge({"bmc": bmc})
+        self.assertIn("可以繼續深化", note)
+        self.assertNotIn("不划算", note)
+
+    def test_refine_prompt_includes_viability_nudge(self):
+        prev = {
+            "title": "T", "summary": "s", "bmc": _valid_bmc("x"),
+            "self_score": 5,
+        }
+        prev["bmc"]["收益流"]["monthly_estimate_twd"] = 100
+        prev["bmc"]["成本結構"]["monthly_estimate_twd"] = 9000
+        state = {
+            "persona": {"name": "A"}, "proposal": prev, "refine_round": 0,
+            "research_items": [], "pov": "POV", "hmw": "HMW", "topic": "T",
+            "research_brief": "brief", "insights": [], "recalled_memory": [],
+        }
+        candidate = graph.json.dumps({
+            "title": "T2", "summary": "s2", "bmc": _valid_bmc("y"),
+            "self_score": 6, "insight_refs": [], "memory_refs": [],
+        })
+        captured = {}
+
+        def fake_call_llm(model, system, user, max_tokens=2500):
+            captured["system"] = system
+            return candidate
+
+        with mock.patch.object(graph, "call_llm", side_effect=fake_call_llm), \
+             mock.patch.object(graph, "emit_event"):
+            graph.refine(state)
+        self.assertIn("不划算", captured["system"])
+
+
+class AnalyzeProblemTests(unittest.TestCase):
+    """使用者要求反過來從問題出發：五力＋趨勢分析定義問題後，才動態生成
+    訪談對象，不是先有固定的 users.yaml 名單。"""
+
+    def _state(self):
+        return {"topic": "如何提升新聞短影音互動率", "company": "北辰短影音"}
+
+    def test_happy_path_parses_five_forces_trend_and_interview_targets(self):
+        llm_response = graph.json.dumps({
+            "five_forces": {
+                "新進入者威脅": "低", "替代品威脅": "中", "顧客議價力": "高",
+                "供應商議價力": "低", "現有競爭者強度": "中",
+            },
+            "trend_analysis": "短影音消費持續成長，年輕世代偏好即時互動。",
+            "problem_statement": "如何在通勤情境下提升互動率而非單純完播率。",
+            "interview_targets": [
+                {"id": "u1", "name": "通勤族小林", "age": 29, "context": "每天通勤 40 分鐘",
+                 "pain_points": ["滑手機時間零碎"], "tone": "直接"},
+                {"id": "u2", "name": "退休族陳伯", "age": 63, "context": "在家看新聞",
+                 "pain_points": ["字太小"], "tone": "客氣"},
+            ],
+        })
+        with mock.patch.object(graph, "web_search", return_value=[]), \
+             mock.patch.object(graph, "call_llm", return_value=llm_response), \
+             mock.patch.object(graph, "emit_event"):
+            result = graph.analyze_problem(self._state())
+        self.assertEqual(len(result["users"]), 2)
+        self.assertEqual(result["users"][0]["name"], "通勤族小林")
+        self.assertIn("如何在通勤情境下提升互動率", result["problem_brief"])
+        self.assertFalse(result["problem_analysis"]["used_fallback_users"])
+        self.assertEqual(result["problem_analysis"]["five_forces"]["顧客議價力"], "高")
+
+    def test_falls_back_to_load_users_when_interview_targets_empty(self):
+        llm_response = graph.json.dumps({
+            "five_forces": {}, "trend_analysis": "", "problem_statement": "",
+            "interview_targets": [],
+        })
+        fallback_users = [{"id": "u1", "name": "陳小姐", "age": 32, "context": "通勤族", "pain_points": [], "tone": ""}]
+        with mock.patch.object(graph, "web_search", return_value=[]), \
+             mock.patch.object(graph, "call_llm", return_value=llm_response), \
+             mock.patch.object(graph, "emit_event"), \
+             mock.patch.object(graph, "load_users", return_value=fallback_users):
+            result = graph.analyze_problem(self._state())
+        self.assertEqual(result["users"], fallback_users)
+        self.assertTrue(result["problem_analysis"]["used_fallback_users"])
+
+    def test_falls_back_to_load_users_when_llm_output_unparseable(self):
+        fallback_users = [{"id": "u1", "name": "陳小姐", "age": 32, "context": "通勤族", "pain_points": [], "tone": ""}]
+        with mock.patch.object(graph, "web_search", return_value=[]), \
+             mock.patch.object(graph, "call_llm", return_value="不是合法 JSON"), \
+             mock.patch.object(graph, "emit_event"), \
+             mock.patch.object(graph, "load_users", return_value=fallback_users):
+            result = graph.analyze_problem(self._state())
+        self.assertEqual(result["users"], fallback_users)
+        self.assertTrue(result["problem_analysis"]["used_fallback_users"])
+        # 保底文字要有內容，不能是空字串
+        self.assertTrue(result["problem_analysis"]["problem_statement"])
 
 
 if __name__ == "__main__":

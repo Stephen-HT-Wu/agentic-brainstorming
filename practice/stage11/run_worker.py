@@ -123,6 +123,25 @@ def _write_state(run_dir: Path, **kwargs) -> None:
     )
 
 
+def _refresh_users_snapshot(users: list) -> None:
+    """使用者要求訪談對象改成由 analyze_problem 節點依問題定義動態生成，
+    不再是啟動前就固定的 users.yaml——但 cmd_start() 寫 config_snapshot.json
+    時（見下方 cmd_start()）會議根本還沒開始跑，只能先寫 sg.load_users()
+    的靜態保底名單。analyze_problem 是父圖 START 後第一個節點，一定會在
+    第一個可能的人類介入點之前就跑完，所以只要 users 非空，這裡拿到的
+    就已經是真正動態生成的名單——把它寫回 config_snapshot.json，即時畫面
+    重新整理／首次載入時 loadRunConfig() 才不會拿到跟真實訪談對象對不上
+    的舊快照（id/name 對不起來，受訪者人物設定會顯示錯誤或顯示不出來）。"""
+    if not users:
+        return
+    snapshot_path = sg.OUTPUT_DIR / "config_snapshot.json"
+    if not snapshot_path.exists():
+        return
+    data = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    data["users"] = users
+    snapshot_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def _inspect_final_state(thread_id: str) -> dict:
     """`sg.main()` 執行完（不管是暫停還是跑完）都不會回傳有用的值——它是設計
     給 CLI 用的。真正的狀態要重新打開 checkpointer、查 graph.get_state() 才知道：
@@ -134,6 +153,8 @@ def _inspect_final_state(thread_id: str) -> dict:
     config = {"configurable": {"thread_id": thread_id}}
     snapshot = graph.get_state(config)
     conn.close()
+
+    _refresh_users_snapshot((snapshot.values or {}).get("users"))
 
     if not snapshot.next:
         result = {"status": "done"}

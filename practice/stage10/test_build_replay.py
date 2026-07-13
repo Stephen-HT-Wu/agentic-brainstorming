@@ -4,18 +4,50 @@ import build_replay as br
 
 
 BMC_KEYS = ["客群", "價值主張", "通路", "顧客關係", "收益流", "關鍵資源", "關鍵活動", "關鍵夥伴", "成本結構"]
+QUANT_BMC_KEYS = {"收益流", "成本結構"}
+
+
+def _valid_bmc(text="x", revenue=1000, cost=1000):
+    """跟 stage9/test_graph.py 的同名 helper 是同一個道理——BMC 量化後
+    「收益流」「成本結構」是結構化物件，不是純字串。"""
+    bmc = {k: text for k in BMC_KEYS}
+    bmc["收益流"] = {"narrative": text, "monthly_estimate_twd": revenue, "basis": "b"}
+    bmc["成本結構"] = {"narrative": text, "monthly_estimate_twd": cost, "basis": "b"}
+    return bmc
 
 
 class BmcFilledCountTests(unittest.TestCase):
     def test_counts_only_nonempty_strings(self):
-        bmc = {k: "內容" for k in BMC_KEYS}
+        bmc = _valid_bmc("內容")
         bmc["客群"] = ""  # 空字串不算
         bmc["通路"] = 123  # 非字串不算
-        self.assertEqual(br._bmc_filled_count(bmc), 7)
+        self.assertEqual(br._bmc_filled_count(bmc), 7)  # 7 個文字格 + 2 個合法量化格 - 2 個被清空的格
+
+    def test_quant_cells_require_valid_structure_not_just_presence(self):
+        bmc = _valid_bmc("內容")
+        bmc["收益流"] = "退化成純文字"  # 舊格式，不再算數
+        self.assertEqual(br._bmc_filled_count(bmc), 8)  # 9 格 - 1 個不合法的收益流
 
     def test_empty_dict_is_zero(self):
         self.assertEqual(br._bmc_filled_count({}), 0)
         self.assertEqual(br._bmc_filled_count(None), 0)
+
+
+class UnitEconomicsTests(unittest.TestCase):
+    def test_computes_margin_and_viability(self):
+        ue = br._unit_economics(_valid_bmc("x", revenue=5000, cost=2000))
+        self.assertEqual(ue["monthly_margin_twd"], 3000)
+        self.assertTrue(ue["is_viable"])
+
+    def test_not_viable_when_cost_exceeds_revenue(self):
+        ue = br._unit_economics(_valid_bmc("x", revenue=1000, cost=4000))
+        self.assertEqual(ue["monthly_margin_twd"], -3000)
+        self.assertFalse(ue["is_viable"])
+
+    def test_handles_missing_bmc_gracefully(self):
+        ue = br._unit_economics({})
+        self.assertEqual(ue["monthly_margin_twd"], 0)
+        self.assertFalse(ue["is_viable"])
 
 
 class ComputeComparisonTests(unittest.TestCase):
@@ -26,12 +58,12 @@ class ComputeComparisonTests(unittest.TestCase):
             "idea_pool_versions": [
                 {"persona_id": "a", "proposal_after": {
                     "sources": [{"url": "u1"}, {"url": "u2"}],
-                    "bmc": {k: "x" for k in BMC_KEYS},
+                    "bmc": _valid_bmc("x"),
                     "memory_refs": ["m1", "m2"],
                 }},
                 {"persona_id": "b", "proposal_after": {
                     "sources": [{"url": "u3"}],
-                    "bmc": {k: "x" for k in BMC_KEYS},
+                    "bmc": _valid_bmc("x"),
                     "memory_refs": [],
                 }},
             ],
@@ -72,7 +104,7 @@ class ComputeComparisonTests(unittest.TestCase):
             "persona_id": "co_created",
             "after": {
                 "sources": [{"url": "u1"}, {"url": "u2"}, {"url": "u3"}],
-                "bmc": {k: "x" for k in BMC_KEYS},
+                "bmc": _valid_bmc("x"),
                 "memory_refs": ["m1"],
             },
         }]))
@@ -87,7 +119,7 @@ class ComputeComparisonTests(unittest.TestCase):
             prototypes=[],
             co_created_proposal={
                 "sources": [{"url": "u1"}],
-                "bmc": {k: "x" for k in BMC_KEYS},
+                "bmc": _valid_bmc("x"),
                 "memory_refs": [],
             },
         ))
@@ -124,6 +156,25 @@ class ComputeComparisonTests(unittest.TestCase):
     def test_handles_zero_agent_proposals_without_crashing(self):
         c = br.compute_comparison(self._run_data(idea_pool_versions=[]))
         self.assertEqual(c["real_sources"]["agent_total"], 0)
+
+    def test_unit_economics_row_reads_final_proposal_and_baseline(self):
+        # 使用者要求 BMC 要能量出可行性——對比表新增的「單位經濟」列要讀
+        # 真正的最終提案（跟 real_sources 用同一份 final_proposal 判斷邏輯），
+        # 不是 idea_pool_versions 裡收斂前的個別版本。
+        c = br.compute_comparison(self._run_data(prototypes=[{
+            "persona_id": "co_created",
+            "after": {"sources": [], "bmc": _valid_bmc("x", revenue=5000, cost=2000), "memory_refs": []},
+        }]))
+        self.assertEqual(c["unit_economics"]["agent"]["monthly_margin_twd"], 3000)
+        self.assertTrue(c["unit_economics"]["agent"]["is_viable"])
+        # baseline fixture 的 bmc 只有 5 格（BMC_KEYS[:5]），"收益流" 是純
+        # 字串（不是合法量化物件），所以 baseline 端退回零值、不可行。
+        self.assertEqual(c["unit_economics"]["baseline"]["monthly_margin_twd"], 0)
+        self.assertFalse(c["unit_economics"]["baseline"]["is_viable"])
+
+    def test_unit_economics_agent_is_none_when_no_final_proposal(self):
+        c = br.compute_comparison(self._run_data())
+        self.assertIsNone(c["unit_economics"]["agent"])
 
 
 class SumDisplayCostTests(unittest.TestCase):

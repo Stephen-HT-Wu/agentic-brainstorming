@@ -112,6 +112,12 @@ BMC_KEYS = [
     "客群", "價值主張", "通路", "顧客關係", "收益流", "關鍵資源", "關鍵活動", "關鍵夥伴", "成本結構",
 ]
 
+# 使用者要求 BMC 要能量出可行性——「收益流」「成本結構」這兩格從純文字
+# 改成結構化物件（narrative + monthly_estimate_twd + basis），才能算出
+# 淨利、判斷這個商業模式划不划算。其餘七格維持一句話文字，沒有理由要求
+# 「客群」「通路」這些格子也塞數字。
+QUANTIFIED_BMC_KEYS = ["收益流", "成本結構"]
+
 usage_log: list = []
 _event_role: ContextVar[str] = ContextVar("event_role", default="system")
 _events_lock = Lock()
@@ -190,10 +196,16 @@ def call_llm(model: str, system: str, user: str, max_tokens: int = 2500) -> str:
             "output": response.usage.output_tokens,
         })
         stop_reason = getattr(response, "stop_reason", None)
-        if stop_reason == "max_tokens" and attempt == 0:
-            print(f"  [call_llm] 截斷（max_tokens={tokens}），加大重試…")
-            continue
         text_parts = [block.text for block in response.content if block.type == "text"]
+        # 真實跑測踩過：extended thinking 有時會把整個 token 預算耗在
+        # thinking 內容上，完全沒剩空間給真正的文字輸出——這種情況
+        # stop_reason 不一定是 "max_tokens"（可能是 "end_turn"），原本
+        # 只看 stop_reason 的重試邏輯接不住，直接炸掉整場會議。「沒有
+        # text block」本質上跟「被截斷」是同一種預算不足的問題，用同一招
+        # 加大 max_tokens 重試。
+        if (stop_reason == "max_tokens" or not text_parts) and attempt == 0:
+            print(f"  [call_llm] 截斷或無文字輸出（max_tokens={tokens}，stop_reason={stop_reason}），加大重試…")
+            continue
         if not text_parts:
             raise ValueError(f"模型回覆中沒有 text block：{response.content!r}")
         return "".join(text_parts)
@@ -385,15 +397,90 @@ def proposal_text_for_embed(proposal: dict) -> str:
     return "\n".join(parts)
 
 
+def _bmc_quant_cell_valid(val) -> bool:
+    return (
+        isinstance(val, dict)
+        and isinstance(val.get("narrative"), str) and bool(val["narrative"].strip())
+        and isinstance(val.get("monthly_estimate_twd"), (int, float))
+        and not isinstance(val.get("monthly_estimate_twd"), bool)
+    )
+
+
+def _bmc_cell_filled(key: str, val) -> bool:
+    if key in QUANTIFIED_BMC_KEYS:
+        return _bmc_quant_cell_valid(val)
+    return isinstance(val, str) and bool(val.strip())
+
+
+def _format_bmc_line(key: str, val) -> str:
+    """報告用的 markdown 一行——量化格是物件，直接 f-string 印會變成
+    Python dict repr，這裡格式化成「敘述＋金額＋依據」的可讀文字。"""
+    if key in QUANTIFIED_BMC_KEYS and isinstance(val, dict):
+        basis = f"（依據：{val.get('basis')}）" if val.get("basis") else ""
+        return f"{val.get('narrative', '')}，估算 NT${val.get('monthly_estimate_twd', 0):,.0f}/月{basis}"
+    return str(val or "")
+
+
 def assert_bmc_complete(proposal: dict) -> List[str]:
     bmc = proposal.get("bmc") or {}
     issues = []
     for key in BMC_KEYS:
         val = bmc.get(key)
-        if not isinstance(val, str) or not val.strip():
+        if key in QUANTIFIED_BMC_KEYS:
+            if not _bmc_quant_cell_valid(val):
+                issues.append(f"缺漏或無效:{key}")
+        elif not isinstance(val, str) or not val.strip():
             issues.append(f"缺漏或無效:{key}")
     issues.extend(f"額外欄位:{key}" for key in bmc if key not in BMC_KEYS)
     return issues
+
+
+def _merge_bmc_cell(key: str, candidate_val, prev_val):
+    if key in QUANTIFIED_BMC_KEYS:
+        if _bmc_quant_cell_valid(candidate_val):
+            return {
+                "narrative": candidate_val["narrative"].strip(),
+                "monthly_estimate_twd": float(candidate_val["monthly_estimate_twd"]),
+                "basis": _safe_str(candidate_val.get("basis")),
+            }
+        return prev_val if isinstance(prev_val, dict) else {"narrative": "", "monthly_estimate_twd": 0.0, "basis": ""}
+    return candidate_val if isinstance(candidate_val, str) and candidate_val.strip() else (prev_val or "")
+
+
+def _merge_bmc(candidate_bmc: dict, prev_bmc: dict) -> dict:
+    candidate_bmc = candidate_bmc or {}
+    prev_bmc = prev_bmc or {}
+    return {key: _merge_bmc_cell(key, candidate_bmc.get(key), prev_bmc.get(key)) for key in BMC_KEYS}
+
+
+def compute_unit_economics(bmc: dict) -> dict:
+    """純函式、零額外 LLM 成本：從量化後的收益流/成本結構算出淨利，
+    是 refine()/revise_after_feedback()/co_create_turn() 軟性引導的依據。"""
+    bmc = bmc or {}
+    revenue = (bmc.get("收益流") or {}).get("monthly_estimate_twd") or 0
+    cost = (bmc.get("成本結構") or {}).get("monthly_estimate_twd") or 0
+    margin = revenue - cost
+    return {
+        "monthly_revenue_twd": revenue,
+        "monthly_cost_twd": cost,
+        "monthly_margin_twd": margin,
+        "is_viable": margin > 0,
+    }
+
+
+def _viability_nudge(prev: dict) -> str:
+    """軟性引導（使用者確認的做法）：把估算損益回饋進修正迴圈的 prompt，
+    不划算時提醒 LLM 認真考慮換方向，而不是新增一個獨立的可行性關卡節點。"""
+    ue = prev.get("unit_economics") or compute_unit_economics(prev.get("bmc") or {})
+    note = (
+        f"上一版估算：月收入 {ue['monthly_revenue_twd']:.0f} 元、"
+        f"月成本 {ue['monthly_cost_twd']:.0f} 元、淨利 {ue['monthly_margin_twd']:+.0f} 元。"
+    )
+    if ue["is_viable"]:
+        note += "目前打平或有賺，可以繼續深化。"
+    else:
+        note += "這樣不划算——這一輪不要只是微調用詞，請認真考慮換一個核心價值主張或商業模式方向。"
+    return note
 
 
 def count_real_citations(proposal: dict, research_items: List[dict]) -> int:
@@ -424,8 +511,7 @@ def metrics_of(proposal: dict, research_items: List[dict], insights: List[dict],
         "bmc_complete": len(missing) == 0,
         "bmc_missing": missing,
         "bmc_filled": sum(
-            isinstance((proposal.get("bmc") or {}).get(k), str)
-            and bool((proposal.get("bmc") or {}).get(k).strip())
+            _bmc_cell_filled(k, (proposal.get("bmc") or {}).get(k))
             for k in BMC_KEYS
         ),
         "real_citations": count_real_citations(proposal, research_items),
@@ -447,6 +533,7 @@ class HomeworkState(TypedDict):
     company: str
     users: List[dict]
     round_id: str
+    problem_brief: str
     raw_results: List[dict]
     research_items: List[dict]
     research_brief: str
@@ -564,6 +651,7 @@ def synthesize(state: HomeworkState) -> dict:
     user = (
         f"會議主題：{state['topic']}\n\n"
         f"自家公司定位：\n{state['company']}\n\n"
+        f"這場會議聚焦的問題定義（五力+趨勢分析得出）：\n{state['problem_brief']}\n\n"
         f"過去輪次的相關記憶：\n{memory_block}\n\n"
         f"搜尋素材：\n{bullet}\n\n"
         "請輸出：1) 市場／競品觀察 2) 對自家有利的切入點 3) 風險與未知。"
@@ -583,6 +671,7 @@ def design_interview_guide(state: HomeworkState) -> dict:
     )
     user = (
         f"會議主題：{state['topic']}\n\n"
+        f"這場會議聚焦的問題定義（五力+趨勢分析得出）：\n{state['problem_brief']}\n\n"
         f"你的關注面向：{', '.join(persona.get('focus') or [])}\n\n"
         f"研究彙整（節錄）：\n{state['research_brief'][:800]}"
     )
@@ -728,7 +817,11 @@ _PROPOSAL_SCHEMA_HINT = f"""
 - sources: [{{"title","url","how_used"}}] 最多 3 筆 — url 必須來自提供的搜尋素材
 - bmc: 物件，鍵必須恰好包含且僅包含這九個：
   {json.dumps(BMC_KEYS, ensure_ascii=False)}
-  每格一句話，<=40字
+  其中「{QUANTIFIED_BMC_KEYS[0]}」「{QUANTIFIED_BMC_KEYS[1]}」兩格必須是物件：
+  {{"narrative": "<=40字", "monthly_estimate_twd": 數字（新台幣/月，粗略估算即可）,
+  "basis": "<=50字，估算依據，例如參考同業定價或訪談中透露的付費意願"}}——
+  允許合理推估，但要在 basis 說明依據，不能隨便填 0 或整數佔位；
+  其餘七格維持一句話文字，<=40字
 - self_score: number 1-10
 - score_reason: string（<=40字）
 務必輸出精簡合法 JSON，避免長文導致截斷。
@@ -816,6 +909,7 @@ def draft_proposal(state: HomeworkState) -> dict:
         f"可用來源：\n{sources_block}"
     )
     proposal = _request_proposal(system, user)
+    proposal["bmc"] = _merge_bmc(proposal.get("bmc"), {})
     issues = assert_bmc_complete(proposal)
     if issues:
         proposal = _request_proposal(
@@ -823,9 +917,11 @@ def draft_proposal(state: HomeworkState) -> dict:
             + _PROPOSAL_SCHEMA_HINT,
             f"結構問題：{issues}\n\n原提案：\n{json.dumps(proposal, ensure_ascii=False)}",
         )
+        proposal["bmc"] = _merge_bmc(proposal.get("bmc"), {})
     proposal = _ensure_hmw_fields(proposal, state)
     if issues := assert_bmc_complete(proposal):
         raise ValueError(f"BMC 結構不變量失敗：{issues}")
+    proposal["unit_economics"] = compute_unit_economics(proposal["bmc"])
     emit_event(
         "draft_proposal",
         f"初稿《{proposal.get('title', '')}》self_score={proposal.get('self_score')} "
@@ -856,6 +952,7 @@ def refine(state: HomeworkState) -> dict:
         f"你的 HMW 是：「{state['hmw']}」，修正後仍要回應它。"
         "請挑出上一版最弱的 2-3 點（商業模式、依據不足、或與公司定位不合），"
         "產出強化後的完整提案 JSON。url 仍只能來自可用來源，insight_refs/memory_refs 仍只能引用提供的 id。"
+        f"{_viability_nudge(prev)}"
         + _PROPOSAL_SCHEMA_HINT
     )
     user = (
@@ -866,17 +963,11 @@ def refine(state: HomeworkState) -> dict:
         f"上一版提案 JSON：\n{json.dumps(prev, ensure_ascii=False)}"
     )
     nxt = _request_proposal(system, user)
-    candidate_bmc = nxt.get("bmc") or {}
-    prev_bmc = prev.get("bmc") or {}
-    nxt["bmc"] = {
-        key: candidate_bmc.get(key)
-        if isinstance(candidate_bmc.get(key), str) and candidate_bmc[key].strip()
-        else prev_bmc.get(key, "")
-        for key in BMC_KEYS
-    }
+    nxt["bmc"] = _merge_bmc(nxt.get("bmc"), prev.get("bmc"))
     nxt = _ensure_hmw_fields(nxt, state)
     if issues := assert_bmc_complete(nxt):
         raise ValueError(f"BMC 結構不變量失敗：{issues}")
+    nxt["unit_economics"] = compute_unit_economics(nxt["bmc"])
 
     dist = embedding_distance(proposal_text_for_embed(prev), proposal_text_for_embed(nxt))
     score_delta = float(nxt.get("self_score") or 0) - float(prev.get("self_score") or 0)
@@ -963,6 +1054,9 @@ _REVISION_SCHEMA_HINT = f"""
 - title, summary, sources, self_score, score_reason：跟原提案同格式
 - bmc: 物件，鍵必須恰好包含且僅包含這九個：
   {json.dumps(BMC_KEYS, ensure_ascii=False)}
+  其中「{QUANTIFIED_BMC_KEYS[0]}」「{QUANTIFIED_BMC_KEYS[1]}」兩格必須是物件：
+  {{"narrative": "<=40字", "monthly_estimate_twd": 數字（新台幣/月）, "basis": "<=50字估算依據"}}；
+  其餘七格維持一句話文字
 - revision_note: string（<=80字，具體說明改了什麼、回應了哪些人的異議，不能空泛帶過）
 - addressed_reviewer_ids: [string] 1-3 筆，必須是收到意見的審閱者 id，不能捏造
 務必輸出精簡合法 JSON。
@@ -1101,6 +1195,7 @@ def revise_after_feedback(state: ReviewRoundState) -> dict:
     system = (
         f"你是 {presenter_name}，剛發表完提案，聽取了其他與會者的意見。"
         "請針對『異議』做出實質修正，不能左耳進右耳出、也不能整份重寫到面目全非。"
+        f"{_viability_nudge(proposal)}"
         + _REVISION_SCHEMA_HINT
     )
     user = f"你的提案：\n{json.dumps(proposal, ensure_ascii=False)}\n\n收到的意見：\n{reviews_block}"
@@ -1110,16 +1205,10 @@ def revise_after_feedback(state: ReviewRoundState) -> dict:
         if not data:
             data = extract_json_object(repair_json_text(raw))
         revised = _ensure_revision_fields(data, proposal, reviews)
-        candidate_bmc = revised.get("bmc") or {}
-        orig_bmc = proposal.get("bmc") or {}
-        revised["bmc"] = {
-            key: candidate_bmc.get(key)
-            if isinstance(candidate_bmc.get(key), str) and candidate_bmc[key].strip()
-            else orig_bmc.get(key, "")
-            for key in BMC_KEYS
-        }
+        revised["bmc"] = _merge_bmc(revised.get("bmc"), proposal.get("bmc"))
         if issues := assert_bmc_complete(revised):
             raise ValueError(f"BMC 結構不變量失敗：{issues}")
+        revised["unit_economics"] = compute_unit_economics(revised["bmc"])
     finally:
         _event_role.reset(role_token)
     emit_event(
@@ -1219,6 +1308,7 @@ def write_collective_wisdom(
     three_lens_checks: List[dict],
     co_created_proposal: dict,
     co_creation_log: List[dict],
+    problem_analysis: dict,
 ) -> dict:
     # 使用者要求把各環節的 insight 也寫進 RAG，日後能重用——之前只寫
     # 大師點評跟最終提案標題摘要跟訪談洞見，POV/HMW、同儕互評內容、三鏡
@@ -1319,6 +1409,17 @@ def write_collective_wisdom(
             "persona": turn.get("persona_name"), "created_at": now,
         })
         ids.append(f"{round_id}-co-creation-turn-{turn.get('turn')}")
+
+    # 使用者要求反過來從問題出發：五力＋趨勢分析定義出的問題陳述，讓未來
+    # 會議的 recall_memory() 有機會撈到「同一家公司之前是怎麼定義問題的」
+    # 這類跨場記憶，不只是這場會議自己讀完就丟。
+    if problem_analysis and problem_analysis.get("problem_statement"):
+        docs.append(f"問題陳述：{problem_analysis['problem_statement']}｜趨勢分析：{problem_analysis.get('trend_analysis', '')}")
+        metas.append({
+            "round_id": round_id, "topic": topic, "doc_type": "problem_analysis",
+            "created_at": now,
+        })
+        ids.append(f"{round_id}-problem-analysis")
 
     if docs:
         wisdom_col.add(documents=docs, metadatas=metas, ids=ids)
@@ -1507,7 +1608,9 @@ def generate_prototype_and_test(task: PrototypeTask) -> dict:
         system_r = (
             f"你是 {persona['name']}，剛把原型概念拿給幾位用戶測試，聽到了他們的第一反應。"
             "請根據這些反應微調提案，不能忽略明顯的疑慮，但也不用照單全收沒有主見的建議。"
-            "只輸出 JSON：{\"title\":\"<=40字\",\"summary\":\"<=120字\",\"bmc\":{九格同前}, "
+            "只輸出 JSON：{\"title\":\"<=40字\",\"summary\":\"<=120字\","
+            "\"bmc\":{九格同前，其中「收益流」「成本結構」兩格是"
+            "{\\\"narrative\\\":\\\"<=40字\\\",\\\"monthly_estimate_twd\\\":數字,\\\"basis\\\":\\\"<=50字\\\"}}, "
             "\"self_score\":數字,\"score_reason\":\"<=40字\","
             "\"revision_note\":\"<=80字，具體說明因為哪則用戶反應改了什麼\"}"
         )
@@ -1520,12 +1623,7 @@ def generate_prototype_and_test(task: PrototypeTask) -> dict:
         final_proposal = dict(proposal)
         final_proposal["title"] = _safe_str(data2.get("title")) or proposal.get("title", "")
         final_proposal["summary"] = _safe_str(data2.get("summary")) or proposal.get("summary", "")
-        candidate_bmc = data2.get("bmc") or {}
-        orig_bmc = proposal.get("bmc") or {}
-        final_proposal["bmc"] = {
-            k: candidate_bmc.get(k) if isinstance(candidate_bmc.get(k), str) and candidate_bmc[k].strip() else orig_bmc.get(k, "")
-            for k in BMC_KEYS
-        }
+        final_proposal["bmc"] = _merge_bmc(data2.get("bmc"), proposal.get("bmc"))
         try:
             final_proposal["self_score"] = float(data2.get("self_score", proposal.get("self_score", 0)))
         except (TypeError, ValueError):
@@ -1533,6 +1631,7 @@ def generate_prototype_and_test(task: PrototypeTask) -> dict:
         revision_note = _safe_str(data2.get("revision_note")) or "（系統保底）已依用戶測試反應微調。"
         if issues := assert_bmc_complete(final_proposal):
             raise ValueError(f"BMC 結構不變量失敗（Test 後 refine）：{issues}")
+        final_proposal["unit_economics"] = compute_unit_economics(final_proposal["bmc"])
 
         dist = embedding_distance(proposal_text_for_embed(proposal), proposal_text_for_embed(final_proposal))
         diff_text = _diff_proposals(proposal, final_proposal)
@@ -1656,6 +1755,7 @@ class PersonaTask(TypedDict):
     persona: dict
     users: List[dict]
     round_id: str
+    problem_brief: str
 
 
 class MeetingState(TypedDict):
@@ -1664,6 +1764,8 @@ class MeetingState(TypedDict):
     round_id: str
     personas: List[dict]
     users: List[dict]
+    problem_brief: str
+    problem_analysis: dict
     persona_results: Annotated[List[dict], operator.add]
     next_presenter_id: Optional[str]
     pending_question: Optional[str]
@@ -1682,6 +1784,114 @@ class MeetingState(TypedDict):
     three_lens_checks: Annotated[List[dict], operator.add]
 
 
+def analyze_problem(state: MeetingState) -> dict:
+    """使用者要求反過來：先用五力分析＋趨勢分析（科技/環境/人口結構/
+    世代價值觀變化）針對這家公司定義出真正該解決的問題，再依這個問題
+    動態生成該訪談誰——不是先有固定的 users.yaml 名單，讓他們的既有
+    痛點決定要問什麼。全會議只執行一次，插在 START 跟 fan_out_personas
+    之間，結果（訪談對象＋問題定義文字）供所有 persona 共用。"""
+    topic = state["topic"]
+    company = state["company"]
+    role_token = _event_role.set("problem_analysis")
+    try:
+        queries = [
+            f"{topic} 產業 趨勢 2026",
+            f"{topic} 科技 環境 人口結構 世代 變化",
+            f"{topic} 競爭者 替代方案",
+        ]
+        raw: List[dict] = []
+        for q in queries:
+            try:
+                hits = web_search(q, max_results=4)
+                usable = [hit for hit in hits if is_usable_search_result(hit)]
+                raw.extend(usable)
+                print(f"  [analyze_problem] query={q!r} → {len(usable)}/{len(hits)} 筆可用")
+            except Exception as exc:  # noqa: BLE001
+                print(f"  [analyze_problem] query={q!r} 失敗：{exc}")
+        sources_block = "\n".join(
+            f"- {it.get('title')} | {it.get('url')}\n  {it.get('snippet', '')[:200]}" for it in raw
+        ) or "（無搜尋結果）"
+
+        system = (
+            "你是產品策略顧問。用 Porter 五力分析＋趨勢分析（科技/環境/人口"
+            "結構/世代價值觀變化）針對這家公司分析這個主題，先定義出真正該"
+            "解決的問題，再依這個問題設計出該訪談哪些利害關係人（訪談對象要"
+            "真的能回答這個問題，不是先射箭再畫靶）。只輸出 JSON：{"
+            "\"five_forces\":{\"新進入者威脅\":\"<=60字\",\"替代品威脅\":\"<=60字\","
+            "\"顧客議價力\":\"<=60字\",\"供應商議價力\":\"<=60字\",\"現有競爭者強度\":\"<=60字\"},"
+            "\"trend_analysis\":\"<=200字，涵蓋科技/環境/人口結構/世代價值觀變化中跟主題最相關的部分\","
+            "\"problem_statement\":\"<=80字，綜合五力+趨勢分析後聚焦出來的真正問題，不是主題字面重複\","
+            "\"interview_targets\":[{\"id\":\"u1\",\"name\":\"...\",\"age\":數字,\"context\":\"<=60字\","
+            "\"pain_points\":[\"...\",\"...\"],\"tone\":\"<=20字\"}]，3-4 位，涵蓋不同利害關係人角度}"
+        )
+        user = f"主題：{topic}\n\n公司定位：\n{company}\n\n搜尋素材：\n{sources_block}"
+        raw_text = call_llm(SMART_MODEL, system, user, max_tokens=2500)
+        data = extract_json_object(raw_text)
+        if not data:
+            data = extract_json_object(repair_json_text(raw_text))
+        data = data or {}
+
+        five_forces = data.get("five_forces")
+        trend_analysis = _safe_str(data.get("trend_analysis"))
+        problem_statement = _safe_str(data.get("problem_statement"))
+        interview_targets = [
+            t for t in (data.get("interview_targets") or [])
+            if isinstance(t, dict) and _safe_str(t.get("name"))
+        ]
+
+        used_fallback = False
+        if not interview_targets:
+            # LLM 輸出解析失敗或訪談對象是空清單——退回既有的 load_users()
+            # 當保底，沿用 write_pov_hmw() 等既有節點「解析失敗就有合理
+            # 保底」的慣例，不讓整場會議因為這步失敗而跑不下去。
+            interview_targets = load_users()
+            used_fallback = True
+        if not isinstance(five_forces, dict) or not five_forces:
+            five_forces = {k: "（系統保底）分析未產生具體內容" for k in
+                            ["新進入者威脅", "替代品威脅", "顧客議價力", "供應商議價力", "現有競爭者強度"]}
+        if not trend_analysis:
+            trend_analysis = "（系統保底）分析未產生具體內容。"
+        if not problem_statement:
+            problem_statement = f"（系統保底）聚焦在「{topic}」本身，未產生更具體的問題定義。"
+
+        problem_analysis = {
+            "five_forces": five_forces,
+            "trend_analysis": trend_analysis,
+            "problem_statement": problem_statement,
+            "used_fallback_users": used_fallback,
+        }
+        problem_brief = (
+            f"問題陳述：{problem_statement}\n\n"
+            "五力分析：\n" + "\n".join(f"- {k}：{v}" for k, v in five_forces.items()) + "\n\n"
+            f"趨勢分析：{trend_analysis}"
+        )
+        print(
+            f"  [analyze_problem] 問題陳述：{problem_statement}"
+            f"（訪談對象 {len(interview_targets)} 位，fallback={used_fallback}）"
+        )
+        emit_event(
+            "analyze_problem",
+            f"問題定義：{problem_statement}",
+            role="problem_analysis",
+            extra={
+                "five_forces": five_forces,
+                "trend_analysis": trend_analysis,
+                "problem_statement": problem_statement,
+                "interview_targets": interview_targets,
+                "queries": queries,
+                "n_results": len(raw),
+                "used_fallback_users": used_fallback,
+            },
+        )
+    finally:
+        _event_role.reset(role_token)
+    return {
+        "users": interview_targets,
+        "problem_brief": problem_brief,
+        "problem_analysis": problem_analysis,
+    }
+
+
 def fan_out_personas(state: MeetingState) -> List[Send]:
     return [
         Send("homework_worker", {
@@ -1690,6 +1900,7 @@ def fan_out_personas(state: MeetingState) -> List[Send]:
             "persona": persona,
             "users": state["users"],
             "round_id": state["round_id"],
+            "problem_brief": state["problem_brief"],
         })
         for persona in state["personas"]
     ]
@@ -1707,6 +1918,7 @@ def homework_worker(task: PersonaTask) -> dict:
             "company": task["company"],
             "users": task["users"],
             "round_id": task["round_id"],
+            "problem_brief": task["problem_brief"],
             "raw_results": [],
             "research_items": [],
             "research_brief": "",
@@ -2031,8 +2243,16 @@ def run_peer_review(state: MeetingState) -> dict:
 
 
 def run_masters(state: MeetingState) -> dict:
+    def _ue_suffix(proposal: dict) -> str:
+        ue = proposal.get("unit_economics") or compute_unit_economics(proposal.get("bmc") or {})
+        return (
+            f"（估算月收入{ue['monthly_revenue_twd']:.0f}/"
+            f"月成本{ue['monthly_cost_twd']:.0f}/淨利{ue['monthly_margin_twd']:+.0f}）"
+        )
+
     idea_pool_summary = "\n".join(
         f"- {v['persona_name']}：《{v['proposal_after'].get('title')}》{v['proposal_after'].get('summary')}"
+        f"{_ue_suffix(v['proposal_after'])}"
         for v in state["idea_pool_versions"]
     ) or "（沒有任何提案）"
     result = master_panel_graph.invoke({
@@ -2130,6 +2350,7 @@ def co_create_turn(state: MeetingState) -> dict:
         "保留其他人已經加進去、你認同的內容。"
         "url 只能來自你自己的可用來源，insight_refs/memory_refs 只能引用"
         "下面列出、屬於你自己的 id。"
+        f"{_viability_nudge(prev_draft)}"
         + _PROPOSAL_SCHEMA_HINT
         + "\n- built_on_persona_ids: [string] 這輪你認為自己整合/呼應了哪些"
           "其他成員（persona id）的觀點，沒有就給空陣列，不能捏造"
@@ -2149,16 +2370,10 @@ def co_create_turn(state: MeetingState) -> dict:
         if not data:
             data = extract_json_object(repair_json_text(raw))
         updated = _ensure_co_creation_fields(data, prev_draft, persona, own_insights, own_memory, all_persona_ids)
-        candidate_bmc = updated.get("bmc") or {}
-        prev_bmc = prev_draft.get("bmc") or {}
-        updated["bmc"] = {
-            key: candidate_bmc.get(key)
-            if isinstance(candidate_bmc.get(key), str) and candidate_bmc[key].strip()
-            else prev_bmc.get(key, "")
-            for key in BMC_KEYS
-        }
+        updated["bmc"] = _merge_bmc(updated.get("bmc"), prev_draft.get("bmc"))
         if issues := assert_bmc_complete(updated):
             raise ValueError(f"BMC 結構不變量失敗：{issues}")
+        updated["unit_economics"] = compute_unit_economics(updated["bmc"])
     finally:
         _event_role.reset(role_token)
 
@@ -2205,6 +2420,7 @@ def write_wisdom(state: MeetingState) -> dict:
         three_lens_checks=state["three_lens_checks"],
         co_created_proposal=state["shared_draft"],
         co_creation_log=state["co_creation_log"],
+        problem_analysis=state["problem_analysis"],
     )
     emit_event("write_wisdom", f"寫入集體智慧庫：{stats}", extra=stats)
     print(f"  [write_wisdom] {stats}")
@@ -2239,6 +2455,7 @@ def run_three_lens_check(state: MeetingState) -> dict:
 
 def build_parent_graph(checkpointer):
     g = StateGraph(MeetingState)
+    g.add_node("analyze_problem", instrument("analyze_problem", analyze_problem))
     g.add_node("homework_worker", instrument("homework_worker", homework_worker))
     g.add_node("facilitator_decide", instrument("facilitator_decide", facilitator_decide))
     g.add_node("ask_question", instrument("ask_question", ask_question))
@@ -2249,7 +2466,8 @@ def build_parent_graph(checkpointer):
     g.add_node("write_wisdom", instrument("write_wisdom", write_wisdom))
     g.add_node("run_prototype_test", instrument("run_prototype_test", run_prototype_test))
     g.add_node("run_three_lens_check", instrument("run_three_lens_check", run_three_lens_check))
-    g.add_conditional_edges(START, fan_out_personas, ["homework_worker"])
+    g.add_edge(START, "analyze_problem")
+    g.add_conditional_edges("analyze_problem", fan_out_personas, ["homework_worker"])
     g.add_edge("homework_worker", "facilitator_decide")
     g.add_conditional_edges(
         "ask_question", route_after_question,
@@ -2294,6 +2512,8 @@ def run_baseline(topic: str, company: str) -> dict:
     user = f"主題：{topic}\n\n公司背景：\n{company}\n\n請直接給提案 JSON。"
     try:
         proposal = _request_proposal(system, user)
+        proposal["bmc"] = _merge_bmc(proposal.get("bmc"), {})
+        proposal["unit_economics"] = compute_unit_economics(proposal["bmc"])
     finally:
         _event_role.reset(role_token)
     node_times["baseline"] = node_times.get("baseline", 0.0) + (
@@ -2511,6 +2731,7 @@ def save_outputs(
     diversity_before: dict,
     diversity_after: dict,
     user_evaluation: dict,
+    problem_analysis: dict,
     final_verdict: str = "",
 ) -> Path:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -2535,6 +2756,11 @@ def save_outputs(
         "master_critiques": master_critiques,
         "wisdom_stats": wisdom_stats,
         "recall_hits_total": recall_hits_total,
+        # 使用者要求反過來從問題出發：五力＋趨勢分析定義出的問題陳述，
+        # 跟依此動態生成的訪談對象（存在上面的 "users" 欄位）是同一次
+        # analyze_problem() 節點的產物，這裡把分析本身也存下來，讓報告
+        # 讀者看得到「為什麼問這些人」的推導過程，不是只有結果。
+        "problem_analysis": problem_analysis,
         # 使用者要求把「全員互評選 Top-K」改成「共創收斂成一個提案」——
         # co_created_proposal 是 co_create_turn 迴圈跑完後 shared_draft
         # 的最終值，跑到這裡它已經不是草稿而是定案版本，對外用更準確
@@ -2583,6 +2809,7 @@ def build_final_report_markdown(
     diversity_before: dict,
     diversity_after: dict,
     user_evaluation: dict,
+    problem_analysis: dict,
     final_verdict: str = "",
 ) -> str:
     id_to_name = {p.get("id"): p.get("name") for p in personas}
@@ -2592,6 +2819,22 @@ def build_final_report_markdown(
     L.append(f"- **Round ID**：{round_id}")
     L.append(f"- **與會者**：{', '.join(p['name'] for p in personas)}")
     L.append(f"- **模擬使用者**：{', '.join(u['name'] for u in users)}\n")
+    L.append("---\n")
+
+    # 使用者要求反過來從問題出發：這區塊回答「為什麼問這些人、為什麼問
+    # 這些問題」——五力＋趨勢分析定義出問題後，才動態生成訪談對象，不是
+    # 先有固定訪談名單、讓他們的既有痛點帶偏問題方向。
+    L.append("## 問題定義（五力＋趨勢分析）\n")
+    L.append(f"**問題陳述**：{problem_analysis.get('problem_statement', '')}\n")
+    five_forces = problem_analysis.get("five_forces") or {}
+    if five_forces:
+        L.append("**五力分析**：\n")
+        for k, v in five_forces.items():
+            L.append(f"- {k}：{v}")
+        L.append("")
+    L.append(f"**趨勢分析**：{problem_analysis.get('trend_analysis', '')}\n")
+    if problem_analysis.get("used_fallback_users"):
+        L.append("（訪談對象因分析解析失敗退回既有預設名單）\n")
     L.append("---\n")
 
     L.append("## 會議軌跡（Facilitator 決策 log）\n")
@@ -2649,7 +2892,7 @@ def build_final_report_markdown(
         L.append(f"**摘要**：{final_proposal.get('summary', '')}\n")
         L.append("**BMC**：\n")
         for k in BMC_KEYS:
-            L.append(f"- {k}：{(final_proposal.get('bmc') or {}).get(k, '')}")
+            L.append(f"- {k}：{_format_bmc_line(k, (final_proposal.get('bmc') or {}).get(k))}")
         L.append(f"\n**原型**：`{proto['html_path']}`（可直接用瀏覽器開啟）\n")
         L.append(f"**測試後修正說明**：{proto['revision_note']}（embedding 距離 {proto['embedding_distance']}）\n")
 
@@ -2809,7 +3052,6 @@ def main() -> None:
 
     topic = os.environ.get("BRAINSTORM_TOPIC", "如何提升新聞短影音互動率")
     personas = load_personas()
-    users = load_users()
     company = load_company()
     script = _load_script(args.script)
 
@@ -2818,7 +3060,11 @@ def main() -> None:
 
     print(f"主題：{topic}")
     print(f"Thread／round_id：{thread_id}（checkpoint db：{CHECKPOINT_DB_PATH}）")
-    print(f"Persona 人數：{len(personas)}；模擬使用者人數：{len(users)}；預算硬上限：${MAX_BUDGET_USD}")
+    # 使用者要求反過來從問題出發：模擬使用者名單不再是啟動前就定死的
+    # users.yaml，改成 analyze_problem 節點依五力+趨勢分析動態生成，跑之前
+    # 還不知道會有幾位、是誰——這裡先只印 persona 人數，訪談對象人數要等
+    # 會議跑完才知道。
+    print(f"Persona 人數：{len(personas)}；模擬使用者：由 analyze_problem 依問題定義動態生成；預算硬上限：${MAX_BUDGET_USD}")
     print(f"Chroma 現有筆數：wisdom={wisdom_count_before}, interviews={interviews_count_before}")
     print(f"事件流：{EVENTS_PATH}")
     print()
@@ -2832,7 +3078,9 @@ def main() -> None:
             "company": company,
             "round_id": round_id,
             "personas": personas,
-            "users": users,
+            "users": [],
+            "problem_brief": "",
+            "problem_analysis": {},
             "persona_results": [],
             "next_presenter_id": None,
             "pending_question": None,
@@ -2859,6 +3107,8 @@ def main() -> None:
         print(f"\n（process 於 {wall_elapsed:.1f}s 後主動結束，尚未完成——用同個 --thread {thread_id} 續跑）")
         return
 
+    users = final_state["users"]
+    problem_analysis = final_state["problem_analysis"]
     persona_results = final_state["persona_results"]
     review_log = final_state["review_log"]
     idea_pool_versions = final_state["idea_pool_versions"]
@@ -2929,6 +3179,7 @@ def main() -> None:
         diversity_before=diversity_before,
         diversity_after=diversity_after,
         user_evaluation=user_evaluation,
+        problem_analysis=problem_analysis,
         final_verdict=final_verdict,
     )
 
@@ -2950,6 +3201,7 @@ def main() -> None:
         diversity_before=diversity_before,
         diversity_after=diversity_after,
         user_evaluation=user_evaluation,
+        problem_analysis=problem_analysis,
         final_verdict=final_verdict,
     )
     report_path = REPORT_DIR / f"{round_id}-final-report.md"
@@ -3017,6 +3269,7 @@ def main() -> None:
     report_complete = (
         report_path.exists()
         and len(report_text) > 500
+        and "問題定義" in report_text
         and "人類提問記錄" in report_text
         and "第一輪訪談（Empathize" in report_text
         and "第二輪訪談（Test" in report_text
@@ -3029,6 +3282,10 @@ def main() -> None:
         0 <= e["agent_score"] <= 10 and 0 <= e["baseline_score"] <= 10
         for e in user_evaluation.get("evaluations") or []
     )
+    # 使用者要求反過來從問題出發：基本健全性檢查——問題定義真的產生了
+    # 內容，訪談對象不是退化成空清單（analyze_problem 失敗時會退回
+    # load_users() 保底，這裡驗證保底機制本身也至少給出可用的名單）。
+    problem_analysis_ok = bool(problem_analysis.get("problem_statement")) and len(users) >= 2
 
     print(f"每人至少發表一次：{'是' if everyone_presented else '否'}（{len(presented_ids)}/{len(personas)}）")
     print(f"發表總次數：{len(idea_pool_versions)}（無輪數上限，只受預算約束）")
@@ -3039,7 +3296,8 @@ def main() -> None:
     print(f"測試反應真的改變了最終版本（embed_dist>0 且有實際 diff）：{'是' if test_changed_version else '否'}")
     print(f"三鏡檢核格式不變量（{len(personas)}人×1個共創提案，每筆恰好3/3/3）：{'是' if three_lens_shape_ok else '否'}")
     print(f"模擬使用者對兩個方案都留下合法評分（{len(user_evaluation.get('evaluations') or [])}/{len(users)}）：{'是' if user_evaluation_ok else '否'}")
-    print(f"最終報告完整（含人類問答＋兩輪訪談記錄＋使用者評分對照）：{'是' if report_complete else '否'}")
+    print(f"問題定義有效（陳述非空、訪談對象 {len(users)} 位）：{'是' if problem_analysis_ok else '否'}")
+    print(f"最終報告完整（含問題定義＋人類問答＋兩輪訪談記錄＋使用者評分對照）：{'是' if report_complete else '否'}")
     print(f"提案多樣性：互評前 {diversity_before['avg_distance']} → 互評後 {diversity_after['avg_distance']}")
     print(f"總耗時：{wall_elapsed:.1f}s")
     print(f"已存檔：{out_path}")
@@ -3056,6 +3314,7 @@ def main() -> None:
         and test_changed_version
         and three_lens_shape_ok
         and user_evaluation_ok
+        and problem_analysis_ok
         and report_complete
         and total_cost() <= MAX_BUDGET_USD + 0.5  # prototype/test/three-lens 階段的花費不算進 facilitator 的預算控管
         and out_path.exists()

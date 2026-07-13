@@ -29,8 +29,44 @@ from typing import Any
 SHARED_RENDERERS_JS = (Path(__file__).resolve().parent / "shared_renderers.js").read_text(encoding="utf-8")
 
 
+# 跟 stage9/graph.py 的 QUANTIFIED_BMC_KEYS 保持一致（stage10 不 import
+# stage9，各自維護是既有慣例）——「收益流」「成本結構」兩格是結構化物件
+# （narrative/monthly_estimate_twd/basis），不是純字串。
+QUANT_BMC_KEYS = {"收益流", "成本結構"}
+
+
+def _bmc_cell_filled(key: str, val) -> bool:
+    if key in QUANT_BMC_KEYS:
+        return (
+            isinstance(val, dict)
+            and isinstance(val.get("narrative"), str) and bool(val["narrative"].strip())
+            and isinstance(val.get("monthly_estimate_twd"), (int, float))
+            and not isinstance(val.get("monthly_estimate_twd"), bool)
+        )
+    return isinstance(val, str) and bool(val.strip())
+
+
 def _bmc_filled_count(bmc: dict) -> int:
-    return sum(1 for v in (bmc or {}).values() if isinstance(v, str) and v.strip())
+    return sum(1 for k, v in (bmc or {}).items() if _bmc_cell_filled(k, v))
+
+
+def _unit_economics(bmc: dict) -> dict:
+    # 舊 run 資料（量化前）或 baseline 這類沒有結構驗證的來源，「收益流」
+    # 可能還是純字串——不能直接 .get()，要先確認真的是合法量化物件。
+    bmc = bmc or {}
+    revenue_cell = bmc.get("收益流")
+    cost_cell = bmc.get("成本結構")
+    revenue = revenue_cell.get("monthly_estimate_twd") if isinstance(revenue_cell, dict) else None
+    cost = cost_cell.get("monthly_estimate_twd") if isinstance(cost_cell, dict) else None
+    revenue = revenue or 0
+    cost = cost or 0
+    margin = revenue - cost
+    return {
+        "monthly_revenue_twd": revenue,
+        "monthly_cost_twd": cost,
+        "monthly_margin_twd": margin,
+        "is_viable": margin > 0,
+    }
 
 
 # 真實資料踩到的坑：stage3 起，`conduct_interviews` 每一輪訪談都會呼叫一次
@@ -115,6 +151,17 @@ def compute_comparison(run_data: dict) -> dict:
         "bmc_completeness": {
             "baseline": f"{_bmc_filled_count(baseline_proposal.get('bmc') or {})}/9",
             "agent_all": agent_bmc_text,
+        },
+        # 使用者要求 BMC 要能量出可行性——收益流/成本結構量化後，這裡直接
+        # 拿真正的最終提案（沒有就退回舊資料格式）跟 baseline 的估算損益
+        # 並陳，回答「這個商業模式到底划不划算」，是六個可量化差異裡最
+        # 直接回應使用者核心問題的新增項目。
+        "unit_economics": {
+            "baseline": baseline_proposal.get("unit_economics") or _unit_economics(baseline_proposal.get("bmc") or {}),
+            "agent": (
+                (final_proposal.get("unit_economics") or _unit_economics(final_proposal.get("bmc") or {}))
+                if final_proposal else None
+            ),
         },
         "cross_domain_integration": {
             "baseline": "N/A（只有一人單獨生成，無跨領域整合）",
@@ -408,11 +455,18 @@ const LEGEND = __LEGEND_JSON__;
 const PERSONAS = __PERSONAS_JSON__;
 const USERS = __USERS_JSON__;
 
+function fmtUnitEconomics(ue) {
+  if (!ue) return 'N/A（舊版資料，BMC 尚未量化）';
+  const margin = Number(ue.monthly_margin_twd || 0);
+  return `淨利 ${margin >= 0 ? '+' : ''}${margin.toFixed(0)} 元/月（${ue.is_viable ? '可行' : '不可行'}）`;
+}
+
 function renderCompareTable() {
   const c = COMPARISON;
   const rows = [
     ["真實搜尋依據", `${c.real_sources.baseline} 筆（模型可能編造，無法驗證）`, `${c.real_sources.agent_total} 筆，來自真實搜尋結果`],
     ["BMC 完整度", c.bmc_completeness.baseline, c.bmc_completeness.agent_all + "（通過結構驗證）"],
+    ["單位經濟（收益流－成本結構）", fmtUnitEconomics(c.unit_economics && c.unit_economics.baseline), fmtUnitEconomics(c.unit_economics && c.unit_economics.agent)],
     ["整合的跨領域觀點數", c.cross_domain_integration.baseline, c.cross_domain_integration.agent],
     ["被批判／測試後改良次數", `${c.revision_count.baseline}（從未被挑戰）`, `${c.revision_count.agent} 次（同儕互評 + 共創編輯 + 用戶測試驅動）`],
     ["跨場記憶引用", `${c.cross_round_memory.baseline}（無記憶，每次都是新對話）`, `${c.cross_round_memory.agent_actually_cited} 筆真實引用（命中 ${c.cross_round_memory.agent_recall_hits} 次）`],

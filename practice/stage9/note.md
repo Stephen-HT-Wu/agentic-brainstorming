@@ -214,3 +214,111 @@ eCPM試驗」，這是真實測試反饋驅動範疇收斂的具體案例。
 輸出真的引用了 5.5/3.0 這組真實分數；`main()` 新增的
 `user_evaluation_ok` 驗收檢查通過。61 個離線測試（stage9/10/11）全數
 通過。
+
+## 第四次迭代（2026-07-13）：BMC 量化＋從問題定義反推訪談對象
+
+使用者一次提了兩件事：
+
+1. **BMC 要量化才有用**——`成本結構`／`收益流` 原本只是一句話文字
+   （例如「訂閱制，中等成本」），沒有任何數字，代表沒有機制能判斷
+   「這個商業模式划不划算」，agent 永遠不會因為數字不合理而換想法。
+2. **訪談對象帶偏了問題方向**——`users.yaml`（陳小姐/王先生/小宇）是
+   固定寫死、跟主題無關的訪談對象，每次會議不管主題是什麼都問同一批
+   人。使用者要求反過來：先用五力分析＋趨勢分析（科技/環境/人口結構/
+   世代價值觀變化）針對公司定義出真正該解決的問題，再依這個問題動態
+   產生該訪談誰。
+
+使用者確認的三個關鍵設計：數字不划算時**軟性引導**（把損益回饋進既有
+`refine()`/`revise_after_feedback()`/`co_create_turn()` 修正迴圈的
+prompt，讓 LLM 自己判斷要不要換方向，不新增獨立的可行性關卡節點）；
+訪談對象**完全動態生成**（不再讀 `users.yaml`，改成 LLM 依五力+趨勢
+分析現場生成）；五力+趨勢分析**全會議只做一次**（parent graph 新增
+共用節點，在所有 persona 開始做功課之前執行一次）。
+
+1. **`收益流`／`成本結構` 從字串改成結構化物件**：新增
+   `QUANTIFIED_BMC_KEYS = ["收益流", "成本結構"]`，這兩格現在是
+   `{"narrative": "...", "monthly_estimate_twd": 數字, "basis": "..."}`，
+   其餘七格維持一句話文字——沒有理由要求「客群」「通路」這些格子也
+   塞數字。`assert_bmc_complete()` 對量化格改成檢查
+   `_bmc_quant_cell_valid()`（narrative 非空字串 + monthly_estimate_twd
+   是數字），其餘格維持原本的字串檢查。新增共用合併函式 `_merge_bmc()`
+   取代 `draft_proposal`/`refine`/`revise_after_feedback`/
+   `co_create_turn`/`generate_prototype_and_test` 五處原本各自重複的
+   per-key dict comprehension——既然這次要動全部五個呼叫點，順手去
+   重複，不是額外機會性重構。
+2. **新函式 `compute_unit_economics(bmc)`**：純函式、零額外 LLM
+   成本，從量化後的收益流/成本結構算出月淨利跟是否可行，掛在每個
+   產生/合併完 BMC 的地方（`proposal["unit_economics"]`），下游（報告/
+   回放/RAG）都能直接讀。
+3. **軟性引導**：新函式 `_viability_nudge(prev)`，在
+   `refine()`/`revise_after_feedback()`/`co_create_turn()`（這三個是
+   「基於上一版修正」的節點，`draft_proposal` 是第一版沒有上一版可
+   比較，不用加）的 system prompt 裡附上上一版的損益數字，不划算時
+   明確提示「這一輪不要只是微調用詞，請認真考慮換一個核心價值主張或
+   商業模式方向」。真實跑測**直接觀察到這個機制生效**：共創編輯第
+   2 輪，陳亞力克斯把原本虧損的方案「改核心商業模式為內部驗證後封閉
+   授權，扭轉虧損為正淨利」——不是換句話說，是真的換了商業模式。
+4. **`biz_master` 終於拿到數字**：`run_masters()` 組
+   `idea_pool_summary` 時，對每個提案附加估算月收入/月成本/淨利——
+   `biz_master` 的 angle 本來就寫著「單位經濟」，但過去 `master_critique()`
+   只收得到標題+摘要，完全沒有數字可評論。真實跑測的商業大師點評第一
+   句就是「林美方案單位經濟最健全：小樣本驗證成本可控且淨利+17000…
+   周依絲最弱：月虧40000且將核心效益列為內部節省而非營收」——批評
+   內容真的在引用具體數字，不是泛泛而談。
+5. **新節點 `analyze_problem`**：插在 `START` 跟 `fan_out_personas`
+   之間，全會議只執行一次。用既有的 `web_search()` 原語做趨勢/五力
+   相關搜尋，單一次 LLM 呼叫（省成本，不拆兩次）輸出五力五格＋趨勢
+   分析＋問題陳述＋3-4 位動態生成的訪談對象（跟 `users.yaml` 同一組
+   欄位形狀：`id/name/age/context/pain_points/tone`，下游
+   `conduct_interviews()`／`_user_system_prompt()` 完全不用改）。解析
+   失敗或訪談對象是空清單時退回既有 `load_users()` 當保底。回傳的
+   `problem_brief` 文字灌注進 `synthesize()`／`design_interview_guide()`
+   的 prompt，訪綱設計現在會被跟公司/主題綁定的具體問題定義帶著走，
+   不再只是由固定訪談對象的既有痛點決定要問什麼。`draft_proposal`/
+   `refine` 不用額外加這段——POV/HMW 已經是從訪談洞見萃取出來的，
+   問題定義的影響透過訪談間接傳遞到位。`company`/baseline 刻意不吃
+   `problem_brief`：baseline 代表「不做額外研究、直接問一次 LLM」，
+   如果連 baseline 都拿到 agent 流程才做的問題定義分析，「編排
+   agents 到底有沒有比較划算」這個對比就會失真。
+6. **報告／RAG**：最終報告新增「## 問題定義（五力＋趨勢分析）」區塊，
+   在「## 共創最終提案」之前，列出五力五格、趨勢分析、問題陳述、動態
+   訪談對象——延續「使用者在 orchestrate agents 的過程中能學到什麼」
+   的精神，讓報告讀者看得到「為什麼問這些人」的推導過程。
+   `write_collective_wisdom()` 新增 `doc_type: "problem_analysis"` RAG
+   寫入，未來會議的 `recall_memory()` 有機會撈到「同一家公司之前是
+   怎麼定義問題的」。回放頁對比表新增「單位經濟」列，直接回答「這個
+   商業模式到底划不划算」。
+
+   踩到兩個真實 bug：
+   - **`call_llm()` 對 extended thinking 耗盡 token 預算沒有重試**：
+     真實跑測時 `give_feedback()` 崩潰，`response.content` 只有
+     `ThinkingBlock` 沒有 `TextBlock`——`stop_reason` 不是
+     `"max_tokens"`（原本重試邏輯只看這個），導致整場會議直接炸掉。
+     這跟本次改動沒有直接關係，是既有 `call_llm()` 的潛在缺陷，真實
+     跑測撞到才發現。修法：`text_parts` 是空的也視同截斷，一併觸發
+     加大 token 重試，不用只看 `stop_reason`。
+   - **`build_replay.py` 的 `_unit_economics()` 對舊格式資料沒有防呆**：
+     BMC 量化前的舊 run 資料、或 baseline 這種沒有結構驗證的來源，
+     「收益流」可能還是純字串——直接 `.get()` 會 `AttributeError`。
+     離線測試裡用 baseline fixture（故意只填 5 格、其中收益流是純
+     字串）就抓到了這個問題，修法是先確認真的是合法量化物件再讀值，
+     不是的話當作 0。
+
+真實跑測驗證（2026-07-13，`bmc-quant-verify-*`，因撞到上述 `call_llm()`
+bug 分兩段跑完，合計總成本約 $4.2）：`analyze_problem` 針對「如何提升
+新聞短影音互動率」產生的問題陳述是「新聞短影音多為單則式資訊摘要，
+缺乏可延續討論的觀點鉤子、系列化角色與世代分眾設計」，五力分析五格
+皆有具體內容（例如「供應商議價力：高度依賴YouTube/IG/TikTok演算法
+分發規則與抽成，媒體幾無議價空間」），動態生成 4 位訪談對象（陳威廷
+腳本編導／林淑芬核心用戶／莊子安Z世代潛在用戶／王啟明品牌廣告主
+窗口）——涵蓋跟五力分析呼應的不同利害關係人角度，完全不同於
+`users.yaml` 的陳小姐/王先生/小宇。量化後的 BMC 真的有數字，例如
+「收益流：同盟台封閉授權費＋聯播分潤＋廣告主報表加值費，估算
+NT$74,000/月」附完整依據說明。`main()` 新增的 `problem_analysis_ok`
+驗收檢查、其餘既有驗收檢查全數通過；68 個離線測試（stage9 37 個 +
+stage10 31 個）全數通過。瀏覽器直接檢查回放頁：`analyze_problem`
+事件的細節面板正確渲染五力/趨勢/問題陳述/訪談對象，`draft_proposal`
+事件的 BMC 九宮格裡量化格顯示「敘述 + NT$金額 + 依據」、無
+`[object Object]` 洩漏，對比表新增的「單位經濟」列正確顯示雙方淨利與
+可行性；stage11 即時面板拓樸圖的 `analyze_problem` 節點正確顯示在
+最前面。

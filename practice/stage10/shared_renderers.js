@@ -87,10 +87,25 @@ function renderUserProfile(user) {
 }
 
 const BMC_ORDER = ["客群","價值主張","通路","顧客關係","收益流","關鍵資源","關鍵活動","關鍵夥伴","成本結構"];
+// 「收益流」「成本結構」量化後是結構化物件（narrative/monthly_estimate_twd/
+// basis），不是純字串——沒有特判會被 esc() 印成 "[object Object]"。
+const QUANT_BMC_KEYS = new Set(["收益流", "成本結構"]);
 function renderBmc(bmc) {
   if (!bmc) return '';
   let html = '<div class="bmc-grid">';
-  for (const k of BMC_ORDER) { if (bmc[k]) html += `<div class="bmc-cell"><div class="bmc-key">${esc(k)}</div><div class="bmc-val">${esc(bmc[k])}</div></div>`; }
+  for (const k of BMC_ORDER) {
+    const v = bmc[k];
+    if (!v) continue;
+    if (QUANT_BMC_KEYS.has(k) && typeof v === 'object') {
+      const margin = v.monthly_estimate_twd;
+      html += `<div class="bmc-cell"><div class="bmc-key">${esc(k)}</div>` +
+        `<div class="bmc-val">${esc(v.narrative)}<br><strong>NT$${esc(Number(margin || 0).toLocaleString())}/月</strong>` +
+        (v.basis ? `<div class="detail-note">${esc(v.basis)}</div>` : '') +
+        `</div></div>`;
+    } else {
+      html += `<div class="bmc-cell"><div class="bmc-key">${esc(k)}</div><div class="bmc-val">${esc(v)}</div></div>`;
+    }
+  }
   html += '</div>';
   return html;
 }
@@ -161,6 +176,16 @@ function renderExtraGeneric(action, extra) {
     return '';
   }
   switch (action) {
+    case 'analyze_problem':
+      // 使用者要求反過來從問題出發：全會議只發生一次，回答「為什麼問這些
+      // 人、為什麼問這些問題」——五力五格＋趨勢分析＋問題陳述＋動態生成的
+      // 訪談對象清單並陳，不用等到報告才看得到推導過程。
+      return block('問題陳述', extra.problem_statement ? `<p>${esc(extra.problem_statement)}</p>` : '') +
+        block('五力分析', ul(Object.entries(extra.five_forces || {}).map(([k, v]) => `${k}：${v}`))) +
+        block('趨勢分析（科技/環境/人口結構/世代價值觀）', extra.trend_analysis ? `<p>${esc(extra.trend_analysis)}</p>` : '') +
+        block('動態生成的訪談對象', (extra.interview_targets || []).map(u =>
+          `<div class="quote"><b>${esc(u.name)}</b>${u.age ? '（' + esc(u.age) + ' 歲）' : ''}<br>${esc(u.context || '')}</div>`).join('')) +
+        (extra.used_fallback_users ? '<div class="detail-note">分析解析失敗，已退回既有預設訪談名單。</div>' : '');
     case 'collect':
       return block('搜尋查詢', ul(extra.queries)) + kv('原始結果數', extra.n_results) + block('搜尋到的網頁（研究足跡）', renderResearchItems(extra.results));
     case 'dedup':

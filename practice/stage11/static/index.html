@@ -256,6 +256,10 @@ function roleColor(role) {
   if (role.startsWith('master:')) return '#9d7bff';
   if (role === 'baseline') return '#8a93a6';
   if (role === 'system') return '#5a6478';
+  // 使用者要求反過來從問題出發：analyze_problem 是全會議只發生一次的
+  // 共用節點，不對應任何真實 persona——給固定色，比照 baseline/system
+  // 的做法，不用 cache-based 通用調色盤。
+  if (role === 'problem_analysis') return '#f97066';
   // 使用者要求讓模擬使用者對共創方案/baseline 評分——這批事件的 role
   // 是 "user:{name}"，用固定色跟 persona 泳道區分開（這是被訪談/評分
   // 的模擬使用者，不是提案的 persona），比照 baseline/system 的做法。
@@ -267,6 +271,7 @@ function roleDisplayName(role) {
   if (role.startsWith('persona:')) return role.slice('persona:'.length);
   if (role.startsWith('master:')) return role.slice('master:'.length);
   if (role.startsWith('user:')) return role.slice('user:'.length);
+  if (role === 'problem_analysis') return '問題定義（五力＋趨勢分析）';
   return role;
 }
 
@@ -443,7 +448,7 @@ document.getElementById('btnStartRun').addEventListener('click', async () => {
 });
 
 // ---------- 即時畫面 ----------
-const TOPO_NODES = ["homework_worker", "facilitator_decide", "ask_question", "answer_question",
+const TOPO_NODES = ["analyze_problem", "homework_worker", "facilitator_decide", "ask_question", "answer_question",
   "run_peer_review", "run_masters", "co_create_turn", "run_prototype_test", "run_three_lens_check",
   "write_wisdom", "evaluate_final_outputs"];
 
@@ -457,6 +462,10 @@ const TOPO_NODES = ["homework_worker", "facilitator_decide", "ask_question", "an
 // TOPO_NODES 裡。對照 practice/stage9/graph.py 裡各子圖 build_*_subgraph()
 // 的 add_node() 清單手動建這張對照表。
 const NODE_TO_SUPERVISOR = {
+  // 使用者要求反過來從問題出發：analyze_problem 全會議只執行一次，是
+  // START 之後第一個節點，給它自己的拓樸節點（不是子步驟，不用對照到
+  // 別的 supervisor 節點）。
+  analyze_problem: "analyze_problem",
   collect: "homework_worker", dedup: "homework_worker", recall_memory: "homework_worker",
   synthesize: "homework_worker", design_interview_guide: "homework_worker",
   conduct_interviews: "homework_worker", extract_insights: "homework_worker",
@@ -524,6 +533,9 @@ async function loadRunConfig(runId) {
 }
 
 function laneOrder(role) {
+  // 使用者要求反過來從問題出發：analyze_problem 是全會議最先發生的
+  // 節點，泳道排在最前面，跟時序一致。
+  if (role === 'problem_analysis') return -1;
   if (role === 'baseline') return 0;
   if (role === 'system') return 1;
   if (role === 'facilitator') return 2;
@@ -695,6 +707,15 @@ function reconnectEvents() {
     const e = JSON.parse(ev.data);
     currentEvents.push(e);
     updateStats(e);
+    // 使用者要求反過來從問題出發：訪談對象改成 analyze_problem 動態生成，
+    // 不再是開會議前就固定的 users.yaml——loadRunConfig() 在頁面一開始
+    // 載入時抓到的 config_snapshot.json 有可能還是（analyze_problem 跑完
+    // 之前寫的）舊的保底名單快照，這裡撞到這筆事件就直接用真正動態生成
+    // 的名單覆蓋 USERS，訪談逐字稿/測試反應/使用者評分的人物設定才能
+    // 正確解析成對得上的姓名跟 pain_points，不會因為快照時機差而對不起來。
+    if (e.action === 'analyze_problem' && e.extra && e.extra.interview_targets && e.extra.interview_targets.length) {
+      USERS = e.extra.interview_targets;
+    }
     const sup = e.node && supervisorNodeFor(e.node);
     if (sup) nodeLastSeen[sup] = Date.now();
     renderLanes();
