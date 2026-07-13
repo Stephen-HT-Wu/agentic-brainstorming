@@ -211,6 +211,26 @@ $0.0349、`interview_one_person` ×9 30.8s $0.0199、`research_and_team` ×2
 
 ## 已知限制（刻意不在這輪處理）
 
+- **`idea_diversity.avg_distance`（收斂結果的「多樣性」數字）不是可靠的
+  絕對指標，只能相對比較**：這個數字是 `pairwise_text_diversity()` 算出來
+  三個 idea 兩兩之間 `1 - cosine 相似度` 的平均，底層 `embedding_distance()`
+  用的不是真正的語意 embedding（沒有呼叫 LLM），而是手刻的字元 n-gram
+  （bigram/trigram）雜湊做 bag-of-words cosine——對「表面詞彙重疊度」極
+  敏感，不等於「策略上到底差多少」。真實跑測校準過（拿同一個
+  `embedding_distance()` 函式測不同對照組）：同一段文字 vs 自己 ≈ 0.00、
+  **同一個 idea 只是換句話說重寫一次 ≈ 0.579**、同主題但真的不同 idea
+  ≈ 0.749、完全不相干的主題 ≈ 0.770。也就是說，真實一場會議量到的
+  `avg_distance`（例如 0.4263、0.563）常常**比「單純換句話說」的基準值還
+  低**——因為三個 idea 討論的是同一個主題（同一個 target audience、同一份
+  共用 BMC、同一批訪談洞見），本來就會共用大量詞彙（健身、會員、續約、
+  短影音…），這個方法量出來的數字會被詞彙重疊壓得偏低，不代表三位
+  persona 真的沒有各自獨立想出不同角度——真正要判斷「是不是真的各自發散」
+  還是要直接看三個 idea 的標題/摘要/理由本身，這個數字目前只適合拿來做
+  「同一個 pipeline 跑不同場次時，這次比上次多樣還是少樣」的相對比較，
+  不該當成絕對好壞的門檻。要修正的話需要換一個真正的語意 embedding
+  方法（例如呼叫一次 embedding API），但這會增加成本跟延遲，跟第 5 點
+  「降低成本」的目標有取捨，這輪先如實記錄這個限制，不動手改。
+
 - `server.py` 的 `RUNS_DIR`（`practice/outputs/runs/`）跟 stage11 共用
   同一個實體目錄——這是從 stage11 複製下來的既有慣例（每個新 stage 都
   沿用同一份 `outputs/runs/`），真實驗證時歷史紀錄清單裡混雜了 stage11
