@@ -1,0 +1,857 @@
+<!doctype html>
+<html lang="zh-Hant"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agentic Brainstorming — 即時控制面板</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "PingFang TC", "Microsoft JhengHei", sans-serif;
+    margin: 0; background: #0b0f19; color: #e8ecf4; line-height: 1.6;
+  }
+  header { padding: 20px 24px; background: linear-gradient(135deg,#1b2540,#0b0f19); display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+  header h1 { margin: 0; font-size: 1.3rem; }
+  nav { display: flex; gap: 8px; margin-left: auto; }
+  nav button {
+    background: #1b2540; color: #9aa5c0; border: 1px solid #2a3557; border-radius: 8px;
+    padding: 8px 16px; cursor: pointer; font-size: 0.9rem;
+  }
+  nav button.active { background: #5b7cff; color: white; border-color: #5b7cff; }
+  .wrap { max-width: 1600px; margin: 0 auto; padding: 24px; }
+
+  /* 使用者要求：點事件不用往下滑才看得到內容——左邊事件泳道，右邊
+     sticky 詳情欄，點了立刻在旁邊看到，不用捲頁面。窄螢幕疊回單欄。 */
+  .player-layout { display: flex; gap: 20px; align-items: flex-start; }
+  .player-main { flex: 1 1 56%; min-width: 0; }
+  .player-side { flex: 1 1 44%; min-width: 340px; position: sticky; top: 20px; align-self: flex-start; }
+  @media (max-width: 900px) {
+    .player-layout { flex-direction: column; }
+    .player-side { position: static; width: 100%; }
+  }
+  .view { display: none; }
+  .view.active { display: block; }
+
+  .card { background: #131a2c; border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+  label { display: block; font-size: 0.8rem; color: #8fb0ff; font-weight: 600; margin-bottom: 4px; }
+  input[type=text], textarea {
+    width: 100%; background: #0f1526; color: #e8ecf4; border: 1px solid #2a3557;
+    border-radius: 6px; padding: 8px 10px; font-family: inherit; font-size: 0.9rem; margin-bottom: 10px;
+  }
+  textarea { min-height: 60px; resize: vertical; }
+  button.primary { background: #5b7cff; color: white; border: none; border-radius: 8px; padding: 10px 20px; font-weight: 600; cursor: pointer; font-size: 0.9rem; }
+  button.primary:hover { background: #4667e0; }
+  button.secondary { background: #1b2540; color: #c4cbe0; border: 1px solid #2a3557; border-radius: 8px; padding: 8px 14px; cursor: pointer; font-size: 0.85rem; }
+  button.danger { background: transparent; color: #ff6b9d; border: 1px solid #ff6b9d44; border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 0.8rem; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .checkbox-row { display: flex; align-items: center; gap: 8px; margin: 10px 0; font-size: 0.88rem; color: #c4cbe0; }
+
+  .persona-card { border: 1px solid #2a3557; border-radius: 10px; padding: 14px; margin-bottom: 12px; position: relative; }
+  .persona-card-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .persona-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .persona-grid .full { grid-column: 1 / -1; }
+
+  .avatar {
+    width: 34px; height: 34px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 0.9rem; color: white; flex-shrink: 0;
+  }
+  .avatar.sm { width: 24px; height: 24px; font-size: 0.72rem; }
+
+  .status-badge { padding: 4px 12px; border-radius: 999px; font-size: 0.8rem; font-weight: 600; }
+  .status-running { background: #5b7cff33; color: #8fb0ff; }
+  .status-paused { background: #ffb45433; color: #ffb454; }
+  .status-done { background: #3ed9c233; color: #3ed9c2; }
+  .status-error { background: #ff6b9d33; color: #ff6b9d; }
+
+  .stat-row { display: flex; flex-wrap: wrap; gap: 16px; }
+  .stat-card { flex: 1 1 150px; background: #131a2c; border-radius: 12px; padding: 16px; text-align: center; }
+  .stat-card .num { font-size: 1.4rem; font-weight: 700; color: #8fb0ff; }
+  .stat-card .label { font-size: 0.8rem; color: #9aa5c0; margin-top: 4px; }
+
+  .topo { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; background: #131a2c; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+  .topo-node {
+    background: #0f1526; border: 1px solid #2a3557; border-radius: 8px; padding: 6px 10px;
+    font-size: 0.78rem; color: #6b7590; transition: all 0.3s; min-width: 128px;
+  }
+  .topo-node.active { border-color: #5b7cff; color: #8fb0ff; background: #1b2540; box-shadow: 0 0 12px #5b7cff55; }
+  .topo-arrow { color: #3a4568; font-size: 0.9rem; }
+  /* 使用者要求每個拓樸方框右上角顯示這一步目前累計花費，用長條比例
+     一眼看出哪一步最貴（第 15 點）。 */
+  .topo-node-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; white-space: nowrap; }
+  .topo-node-cost { font-size: 0.7rem; color: #8fb0ff; font-variant-numeric: tabular-nums; }
+  .topo-node-bar-track { margin-top: 4px; height: 3px; background: #1f2942; border-radius: 2px; overflow: hidden; }
+  .topo-node-bar { height: 100%; background: #5b7cff; border-radius: 2px; transition: width 0.4s; }
+
+  .hitl-panel { background: #221a2c; border: 1px solid #ffb45455; border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+  .hitl-panel h3 { margin: 0 0 10px; color: #ffb454; font-size: 1rem; }
+  .hitl-questions { font-size: 0.85rem; color: #9aa5c0; margin: 10px 0; }
+  .idea-pick-card {
+    border: 1px solid #2a3557; border-radius: 10px; padding: 10px 12px; cursor: pointer; background: #0f1526;
+  }
+  .idea-pick-card:hover { border-color: #5b7cff88; }
+  .idea-pick-card.selected { border-color: #ffb454; background: #1b1420; box-shadow: 0 0 0 1px #ffb45455; }
+
+  .lane { display: flex; gap: 12px; margin-bottom: 10px; align-items: flex-start; }
+  .lane-head { width: 150px; flex-shrink: 0; display: flex; align-items: center; gap: 8px; padding-top: 6px; }
+  .lane-head-text { min-width: 0; }
+  .lane-name { font-weight: 700; font-size: 0.85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lane-role { font-size: 0.72rem; color: #9aa5c0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lane-chips { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; min-width: 0; }
+  .chip {
+    background: #131a2c; border: 1px solid #2a3557; border-radius: 6px; padding: 5px 10px;
+    font-size: 0.76rem; color: #c4cbe0; cursor: pointer; white-space: nowrap;
+  }
+  .chip:hover { border-color: #5b7cff; }
+  .chip.selected { background: #1b2540; border-color: #5b7cff; color: #8fb0ff; }
+
+  .detail-panel { background: #0f1526; border-radius: 12px; padding: 16px; min-height: 80px; max-height: calc(100vh - 40px); overflow-y: auto; }
+  /* stage11 的 #lanes 原本沒有高度限制，事件一多會無限長高，讓右邊 sticky
+     詳情欄失去意義（左欄比視窗還高，sticky 就跟一般排版沒兩樣）。 */
+  #lanesCard { max-height: calc(100vh - 40px); overflow-y: auto; }
+  .detail-panel .role { font-weight: 700; margin-bottom: 6px; }
+  .detail-panel .summary-line { color: #c4cbe0; margin-bottom: 4px; }
+  .detail-panel pre { white-space: pre-wrap; word-break: break-word; font-family: inherit; margin: 8px 0 0; font-size: 0.85rem; color: #a8b2cc; }
+  .detail-note { color: #8a93a6; font-size: 0.82rem; font-style: italic; margin: 6px 0; }
+  .detail-proposal-title { font-size: 1.05rem; font-weight: 700; color: #e8ecf4; margin-top: 8px; }
+  .detail-block { margin-top: 14px; }
+  .detail-block-title { font-size: 0.78rem; font-weight: 700; color: #8fb0ff; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px; }
+  .detail-list { margin: 0; padding-left: 18px; }
+  .detail-list li { margin-bottom: 4px; font-size: 0.88rem; color: #c4cbe0; }
+  .kv { display: flex; gap: 8px; font-size: 0.85rem; margin-bottom: 4px; }
+  .kv .k { color: #6b7590; flex-shrink: 0; }
+  .kv .v { color: #c4cbe0; }
+  .bmc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
+  .bmc-cell { background: #131a2c; border-radius: 6px; padding: 8px 10px; }
+  .bmc-key { font-size: 0.75rem; color: #8fb0ff; font-weight: 700; margin-bottom: 3px; }
+  .bmc-val { font-size: 0.82rem; color: #c4cbe0; }
+  .quote { background: #131a2c; border-left: 3px solid #2a3557; border-radius: 4px; padding: 8px 12px; margin-bottom: 8px; font-size: 0.88rem; color: #c4cbe0; }
+  .quote b { color: #8fb0ff; }
+
+  table.runs { width: 100%; border-collapse: collapse; }
+  table.runs th, table.runs td { text-align: left; padding: 10px 14px; border-bottom: 1px solid #1f2942; font-size: 0.88rem; }
+  table.runs th { color: #8fb0ff; }
+  table.runs tr:hover td { background: #131a2c; cursor: pointer; }
+  .empty-hint { color: #6b7590; font-size: 0.88rem; padding: 20px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Agentic Brainstorming — 即時控制面板</h1>
+  <nav>
+    <button data-view="setup" class="active">設定</button>
+    <button data-view="live">即時畫面</button>
+    <button data-view="history">歷史紀錄</button>
+  </nav>
+</header>
+
+<div class="wrap">
+
+  <div class="view active" id="view-setup">
+    <div class="card">
+      <label>主題</label>
+      <input type="text" id="topicInput" placeholder="例如：公司要不要導入 AI 自動生成新聞內容">
+      <div class="checkbox-row">
+        <input type="checkbox" id="exampleConfigCheck">
+        <label style="margin:0" for="exampleConfigCheck">使用範例設定（personas.example.yaml，不動用真實人設，也不寫進真實集體智慧庫，適合先試跑）</label>
+      </div>
+      <button class="primary" id="btnStartRun">開始腦力激盪</button>
+      <span id="startRunError" style="color:#ff6b9d;margin-left:12px;font-size:0.85rem;"></span>
+    </div>
+
+    <div class="card">
+      <div class="row" style="justify-content:space-between;margin-bottom:14px;">
+        <div style="font-weight:700;">Persona 設定<span id="personaSource" style="font-size:0.78rem;color:#6b7590;margin-left:8px;"></span></div>
+        <div class="row">
+          <button class="secondary" id="btnAddPersona">+ 新增 persona</button>
+          <button class="primary" id="btnSavePersonas">儲存人設</button>
+        </div>
+      </div>
+      <div id="personaList"></div>
+    </div>
+
+    <div class="card">
+      <div class="row" style="justify-content:space-between;margin-bottom:14px;">
+        <div style="font-weight:700;">模擬用戶（被訪談者）設定<span id="userSource" style="font-size:0.78rem;color:#6b7590;margin-left:8px;"></span></div>
+        <div class="row">
+          <button class="secondary" id="btnAddUser">+ 新增模擬用戶</button>
+          <button class="primary" id="btnSaveUsers">儲存模擬用戶</button>
+        </div>
+      </div>
+      <div id="userList"></div>
+    </div>
+  </div>
+
+  <div class="view" id="view-live">
+    <div class="card row" style="justify-content:space-between;">
+      <div>
+        <div id="liveTopic" style="font-weight:700;font-size:1.1rem;"></div>
+        <div id="liveRunId" style="font-size:0.78rem;color:#6b7590;"></div>
+      </div>
+      <span id="liveStatusBadge" class="status-badge status-running">running</span>
+    </div>
+
+    <div class="stat-row" style="margin-bottom:16px;">
+      <div class="stat-card"><div class="num" id="statStepCost">$0.0000</div><div class="label">這一步成本</div></div>
+      <div class="stat-card"><div class="num" id="statTotalCost">$0.0000</div><div class="label">累計成本</div></div>
+      <div class="stat-card"><div class="num" id="statStepTime">0s</div><div class="label">這一步耗時</div></div>
+      <div class="stat-card"><div class="num" id="statTotalTime">0s</div><div class="label">累計耗時（不含等待人類）</div></div>
+    </div>
+
+    <div class="topo" id="topo"></div>
+
+    <div class="card" id="reportCard" style="display:none;">
+      <div class="row" style="justify-content:space-between;margin-bottom:10px;">
+        <div style="font-weight:700;">最終報告</div>
+        <a id="reportOpenRaw" href="#" target="_blank" class="secondary" style="text-decoration:none;padding:8px 14px;border-radius:8px;border:1px solid #2a3557;color:#c4cbe0;font-size:0.85rem;">開新分頁看原始 .md ↗</a>
+      </div>
+      <pre id="reportBody" style="white-space:pre-wrap;word-break:break-word;font-family:inherit;font-size:0.88rem;color:#c4cbe0;max-height:480px;overflow-y:auto;margin:0;"></pre>
+    </div>
+
+    <div class="hitl-panel" id="hitlPanel" style="display:none;">
+      <h3>⏸ 人類介入點：向任一 idea 提問</h3>
+      <div class="row" style="margin-bottom:10px;">
+        <label style="margin:0;white-space:nowrap;">你的名稱</label>
+        <input type="text" id="hitlDisplayName" placeholder="匿名" style="max-width:200px;margin-bottom:0;">
+      </div>
+      <div id="hitlPrompt" style="margin:4px 0 10px;color:#c4cbe0;font-size:0.9rem;"></div>
+      <div id="hitlIdeas" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px;margin-bottom:10px;"></div>
+      <div class="hitl-questions" id="hitlQuestions"></div>
+      <div class="row">
+        <input type="text" id="hitlQuestionInput" placeholder="選好上面的 idea 後輸入問題（留空直接跳過）" style="flex:1;margin-bottom:0;">
+        <button class="primary" id="btnAsk">提問</button>
+        <button class="secondary" id="btnSkip">跳過，進入 DFV 評分</button>
+      </div>
+    </div>
+
+    <div class="player-layout">
+      <div class="player-main">
+        <div class="card" id="lanesCard">
+          <div id="lanes"></div>
+          <div id="lanesEmpty" class="empty-hint">還沒有事件——開始一場會議後這裡會即時顯示每個角色的平行進度</div>
+        </div>
+      </div>
+      <div class="player-side">
+        <div class="detail-panel" id="detailPanel">
+          <div class="role">點一個事件方塊看完整內容</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="view" id="view-history">
+    <div class="card">
+      <table class="runs" id="runsTable">
+        <thead><tr><th>主題</th><th>狀態</th><th>開始時間</th><th></th></tr></thead>
+        <tbody id="runsTableBody"></tbody>
+      </table>
+      <div id="runsEmpty" class="empty-hint" style="display:none;">還沒有任何會議紀錄</div>
+    </div>
+  </div>
+
+</div>
+
+<script src="/static/shared_renderers.js"></script>
+<script>
+// ---------- 頭像（本地決定性產生，不打任何 API）----------
+function hashCode(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+function avatarHtml(id, name, size) {
+  const hue = hashCode(String(id || name || '?')) % 360;
+  const initials = (name || '?').slice(0, 1);
+  const cls = size === 'sm' ? 'avatar sm' : 'avatar';
+  return `<div class="${cls}" style="background:hsl(${hue},55%,42%)">${esc(initials)}</div>`;
+}
+
+// ---------- role 配色（跟 stage10 build_replay.py 同一套邏輯）----------
+const ROLE_COLOR_PALETTE = ["#5b7cff", "#3ed9c2", "#ffb454", "#ff6b9d", "#9d7bff", "#4ade80"];
+const roleColorCache = {};
+function roleColor(role) {
+  // stage12 沒有 facilitator/master——DFV 三面向評審用 "dfv:{lens_name}"
+  // 這個 role 格式，比照 stage9 master 泳道的固定色處理。
+  if (role.startsWith('dfv:')) return '#9d7bff';
+  if (role === 'baseline') return '#8a93a6';
+  if (role === 'system') return '#5a6478';
+  if (role === 'verdict') return '#ffb454';
+  // analyze_and_scope 是全會議只發生一次的共用節點，不對應任何真實
+  // persona——給固定色，比照 baseline/system 的做法，不用 cache-based
+  // 通用調色盤。
+  if (role === 'problem_analysis') return '#f97066';
+  // 訪談對象／最終評估者這批事件的 role 是 "user:{name}"，用固定色跟
+  // persona 泳道區分開，比照 baseline/system 的做法。
+  if (role.startsWith('user:')) return '#3ed9c2';
+  if (!(role in roleColorCache)) roleColorCache[role] = ROLE_COLOR_PALETTE[Object.keys(roleColorCache).length % ROLE_COLOR_PALETTE.length];
+  return roleColorCache[role];
+}
+function roleDisplayName(role) {
+  if (role.startsWith('persona:')) return role.slice('persona:'.length);
+  if (role.startsWith('dfv:')) return role.slice('dfv:'.length);
+  if (role.startsWith('user:')) return role.slice('user:'.length);
+  if (role === 'problem_analysis') return '策略目標定義（五力＋趨勢分析）';
+  if (role === 'verdict') return 'AI 對照評語';
+  return role;
+}
+
+// ---------- 視圖切換 ----------
+document.querySelectorAll('nav button').forEach(btn => {
+  btn.addEventListener('click', () => switchView(btn.dataset.view));
+});
+function switchView(name) {
+  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('active', b.dataset.view === name));
+  document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === 'view-' + name));
+  if (name === 'history') loadHistory();
+}
+
+// ---------- 設定畫面：persona／模擬用戶編輯 ----------
+let personas = [];
+let users = [];  // 設定畫面用的可編輯清單——跟事件細節解析用的全域 USERS
+                 // 是分開的（那個是「這場 run 實際用的」快照，見 loadRunConfig()）
+
+async function loadUsers() {
+  const res = await fetch('/api/users');
+  const data = await res.json();
+  users = data.users;
+  document.getElementById('userSource').textContent = data.source === 'real' ? '（讀取真實設定 users.yaml）' : '（目前是範例設定 users.example.yaml，儲存後會建立你自己的 users.yaml）';
+  renderUserList();
+}
+
+function personaCardHtml(p, idx) {
+  return `
+  <div class="persona-card" data-idx="${idx}">
+    <div class="persona-card-head">
+      ${avatarHtml(p.id, p.name, 'sm')}
+      <div style="flex:1"></div>
+      <button class="danger" onclick="removePersona(${idx})">移除</button>
+    </div>
+    <div class="persona-grid">
+      <div><label>id</label><input type="text" data-field="id" value="${esc(p.id || '')}"></div>
+      <div><label>姓名</label><input type="text" data-field="name" value="${esc(p.name || '')}"></div>
+      <div class="full"><label>角色／專業</label><input type="text" data-field="role" value="${esc(p.role || '')}"></div>
+      <div class="full"><label>背景</label><textarea data-field="background">${esc(p.background || '')}</textarea></div>
+      <div class="full"><label>關注面向（每行一項）</label><textarea data-field="focus">${esc((p.focus || []).join('\n'))}</textarea></div>
+      <div class="full"><label>發言風格</label><input type="text" data-field="style" value="${esc(p.style || '')}"></div>
+    </div>
+  </div>`;
+}
+
+function renderPersonaList() {
+  document.getElementById('personaList').innerHTML = personas.map((p, i) => personaCardHtml(p, i)).join('')
+    || '<div class="empty-hint">還沒有 persona，按上面「新增 persona」開始設定</div>';
+}
+
+function collectPersonaFormsIntoState() {
+  // 一定要限定在 #personaList 底下——使用者要求的模擬用戶編輯器複用了
+  // 同一個 .persona-card CSS class（純粹共用樣式），如果不加這個範圍限制，
+  // 這個查詢會連使用者卡片也一起選到，把 users[idx] 的欄位寫進
+  // personas[idx]，資料會整個錯亂（實測踩到，靠 code review 抓到，不是
+  // 猜測）。
+  document.querySelectorAll('#personaList .persona-card').forEach(card => {
+    const idx = parseInt(card.dataset.idx);
+    const p = personas[idx];
+    card.querySelectorAll('[data-field]').forEach(el => {
+      const field = el.dataset.field;
+      if (field === 'focus') p[field] = el.value.split('\n').map(s => s.trim()).filter(Boolean);
+      else p[field] = el.value;
+    });
+  });
+}
+
+window.removePersona = function (idx) {
+  collectPersonaFormsIntoState();
+  personas.splice(idx, 1);
+  renderPersonaList();
+};
+
+document.getElementById('btnAddPersona').addEventListener('click', () => {
+  collectPersonaFormsIntoState();
+  personas.push({ id: '', name: '', role: '', background: '', focus: [], style: '' });
+  renderPersonaList();
+});
+
+document.getElementById('btnSavePersonas').addEventListener('click', async () => {
+  collectPersonaFormsIntoState();
+  const res = await fetch('/api/personas', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ personas }),
+  });
+  if (res.ok) { alert('人設已儲存'); loadPersonas(); }
+  else { const err = await res.json(); alert('儲存失敗：' + (err.detail || res.status)); }
+});
+
+async function loadPersonas() {
+  const res = await fetch('/api/personas');
+  const data = await res.json();
+  personas = data.personas;
+  document.getElementById('personaSource').textContent = data.source === 'real' ? '（讀取真實設定 personas.yaml）' : '（目前是範例設定 personas.example.yaml，儲存後會建立你自己的 personas.yaml）';
+  renderPersonaList();
+}
+
+// 使用者要求「訪談者也可以像 persona 一樣在開始前做設定」——跟 persona
+// 編輯器同款式，欄位換成 users.yaml 的形狀（id/name/age/context/
+// pain_points/tone），age 是數字、pain_points 比照 focus 用換行分陣列。
+function userCardHtml(u, idx) {
+  return `
+  <div class="persona-card" data-idx="${idx}">
+    <div class="persona-card-head">
+      ${avatarHtml(u.id, u.name, 'sm')}
+      <div style="flex:1"></div>
+      <button class="danger" onclick="removeUser(${idx})">移除</button>
+    </div>
+    <div class="persona-grid">
+      <div><label>id</label><input type="text" data-field="id" value="${esc(u.id || '')}"></div>
+      <div><label>姓名</label><input type="text" data-field="name" value="${esc(u.name || '')}"></div>
+      <div><label>年齡</label><input type="text" data-field="age" value="${esc(u.age !== undefined && u.age !== null ? u.age : '')}"></div>
+      <div class="full"><label>情境</label><textarea data-field="context">${esc(u.context || '')}</textarea></div>
+      <div class="full"><label>痛點（每行一項）</label><textarea data-field="pain_points">${esc((u.pain_points || []).join('\n'))}</textarea></div>
+      <div class="full"><label>說話口吻</label><input type="text" data-field="tone" value="${esc(u.tone || '')}"></div>
+    </div>
+  </div>`;
+}
+
+function renderUserList() {
+  document.getElementById('userList').innerHTML = users.map((u, i) => userCardHtml(u, i)).join('')
+    || '<div class="empty-hint">還沒有模擬用戶，按上面「新增模擬用戶」開始設定</div>';
+}
+
+function collectUserFormsIntoState() {
+  document.querySelectorAll('#userList .persona-card').forEach(card => {
+    const idx = parseInt(card.dataset.idx);
+    const u = users[idx];
+    card.querySelectorAll('[data-field]').forEach(el => {
+      const field = el.dataset.field;
+      if (field === 'pain_points') u[field] = el.value.split('\n').map(s => s.trim()).filter(Boolean);
+      else if (field === 'age') u[field] = el.value.trim() ? Number(el.value.trim()) : null;
+      else u[field] = el.value;
+    });
+  });
+}
+
+window.removeUser = function (idx) {
+  collectUserFormsIntoState();
+  users.splice(idx, 1);
+  renderUserList();
+};
+
+document.getElementById('btnAddUser').addEventListener('click', () => {
+  collectUserFormsIntoState();
+  users.push({ id: '', name: '', age: null, context: '', pain_points: [], tone: '' });
+  renderUserList();
+});
+
+document.getElementById('btnSaveUsers').addEventListener('click', async () => {
+  collectUserFormsIntoState();
+  const res = await fetch('/api/users', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ users }),
+  });
+  if (res.ok) { alert('模擬用戶已儲存'); loadUsers(); }
+  else { const err = await res.json(); alert('儲存失敗：' + (err.detail || res.status)); }
+});
+
+document.getElementById('btnStartRun').addEventListener('click', async () => {
+  const topic = document.getElementById('topicInput').value.trim();
+  const errEl = document.getElementById('startRunError');
+  errEl.textContent = '';
+  if (!topic) { errEl.textContent = '請先輸入主題'; return; }
+  const exampleConfig = document.getElementById('exampleConfigCheck').checked;
+  const res = await fetch('/api/runs', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ topic, example_config: exampleConfig }),
+  });
+  if (!res.ok) { const err = await res.json(); errEl.textContent = err.detail || ('錯誤 ' + res.status); return; }
+  const data = await res.json();
+  switchView('live');
+  openLiveRun(data.run_id, topic);
+});
+
+// ---------- 即時畫面 ----------
+// stage12 的父圖是一條線性 DAG（沒有 stage9 那種多層巢狀子圖），只有
+// interview_one_person（system_research 底下的訪談 fan-out）跟
+// score_one_dimension（dfv_scoring 底下的 DFV fan-out）是巢狀子圖節點；
+// evaluate_with_agents 是跟 baseline 一樣、main() 裡直接呼叫的一般函式
+// （手動 set_current_node()），不是圖節點，但使用者要求看得到這個階段
+// 的進度，所以也給它一個拓樸方框（對照 practice/stage12/graph.py 的
+// build_parent_graph() 實測 get_graph().nodes 確認過這張清單）。
+const TOPO_NODES = ["analyze_and_scope", "research_and_team", "draft_one_idea", "ask_question", "answer_question",
+  "dfv_scoring", "pick_winner", "generate_prototype", "generate_evaluators", "evaluate_with_agents"];
+
+const NODE_TO_SUPERVISOR = {
+  analyze_and_scope: "analyze_and_scope",
+  research_and_team: "research_and_team", interview_one_person: "research_and_team",
+  draft_one_idea: "draft_one_idea",
+  ask_question: "ask_question", answer_question: "answer_question",
+  dfv_scoring: "dfv_scoring", score_one_dimension: "dfv_scoring",
+  pick_winner: "pick_winner",
+  generate_prototype: "generate_prototype",
+  generate_evaluators: "generate_evaluators",
+  // baseline 跟 stage9 一樣刻意不給拓樸方框——它是跟主線平行跑的背景
+  // 對照組，不是這條故事線的「步驟」，見 graph.py run_baseline()。
+  evaluate_with_agents: "evaluate_with_agents", user_evaluation_summary: "evaluate_with_agents",
+};
+function supervisorNodeFor(node) { return NODE_TO_SUPERVISOR[node] || null; }
+
+// 使用者要求反過來從問題出發：research_and_team 這個 supervisor bucket
+// 底下實際有兩次循序呼叫（system_research 內部萃取洞見/BMC 那次 LLM
+// 呼叫，接著 generate_personas 那次）共用同一個 instrument() invocation，
+// emit_event 的 cost_usd 是「這次 invocation 累計到目前為止」的花費，
+// 不是這筆事件單獨的花費——"system_research" 這個 action 只是過程中的
+// 快照，真正的累計總額在後面的 "generate_personas" 那筆事件裡，重複加總
+// 會高估。這是跟 stage10/shared_renderers.js 的 COST_SNAPSHOT_ACTIONS
+// 同一套邏輯，但排除清單不一樣（stage12 沒有 conduct_interviews/
+// generate_prototype_and_test 那種「测试再修正」的多步驟節點，
+// generate_prototype 這裡是單次生成、只有一筆 emit_event，不能沿用
+// stage9/11 那份把 "generate_prototype" 整個排除的清單，否則會把
+// stage12 唯一一筆原型花費也錯誤地歸零）——所以這裡用自己的排除清單，
+// 呼叫 shared_renderers.js 的 sumDisplayCost() 時明確帶入，不動共用檔案
+// 對 stage10/11 的預設行為。
+const STAGE12_COST_SNAPSHOT_ACTIONS = new Set(['interview_turn', 'system_research']);
+
+const nodeLastSeen = {};
+const nodeCost = {};
+const RECENCY_MS = 6000;
+
+function renderTopo() {
+  const now = Date.now();
+  const maxCost = Math.max(0.000001, ...TOPO_NODES.map(n => nodeCost[n] || 0));
+  document.getElementById('topo').innerHTML = TOPO_NODES.map((n, i) => {
+    const active = nodeLastSeen[n] && (now - nodeLastSeen[n] < RECENCY_MS);
+    const arrow = i < TOPO_NODES.length - 1 ? '<span class="topo-arrow">→</span>' : '';
+    const cost = nodeCost[n] || 0;
+    const pct = Math.round((cost / maxCost) * 100);
+    return `<span class="topo-node${active ? ' active' : ''}">
+      <div class="topo-node-head"><span>${esc(n)}</span><span class="topo-node-cost">$${cost.toFixed(4)}</span></div>
+      <div class="topo-node-bar-track"><div class="topo-node-bar" style="width:${cost > 0 ? Math.max(pct, 4) : 0}%"></div></div>
+    </span>${arrow}`;
+  }).join('');
+}
+setInterval(renderTopo, 1000);
+
+let currentRunId = null;
+let currentEventSource = null;
+let currentEvents = [];
+let selectedEventIdx = null;
+// 這場正在看的 run 實際用的 personas/users 快照——跟設定畫面的 personas／
+// users 分開，因為設定畫面反映的是「現在」的狀態，可能在這場會議開始後
+//又被改掉，或者這場是 --example-config 但使用者真實設定檔存在，兩者對
+//不起來。事件細節裡解析 persona_id／user_id 一律要用這兩個，不能用
+// 設定畫面那兩個全域變數。
+let PERSONAS = [];
+let USERS = [];
+
+async function loadRunConfig(runId) {
+  // worker subprocess 剛 spawn 時，config_snapshot.json 還沒寫出來（python
+  // 啟動 + import graph.py 有 import chromadb 之類的重量開銷，實測會有
+  // 一段空窗）——這裡撞到的話後端 /config 會回傳預設的空陣列，若只 fetch
+  // 一次、不重試，PERSONAS/USERS 會整場會議都是空的，泳道角色標籤/受訪者
+  // 人物設定全部退回「系統」這種 fallback，看不出真正身份。重試到拿到
+  // 非空資料為止（或放棄，回退到空陣列，此時退回舊有 fallback 顯示）。
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const res = await fetch(`/api/runs/${runId}/config`);
+    const data = await res.json();
+    if ((data.personas && data.personas.length) || (data.users && data.users.length)) {
+      PERSONAS = data.personas || [];
+      USERS = data.users || [];
+      return;
+    }
+    if (attempt < 7) await new Promise(r => setTimeout(r, 400));
+  }
+  PERSONAS = [];
+  USERS = [];
+}
+
+function laneOrder(role) {
+  // analyze_and_scope 是全會議最先發生的節點，泳道排在最前面，跟時序
+  // 一致；DFV 三面向評審、user:（訪談對象/最終評估者）、verdict 依序排
+  // 在 persona 提案泳道之後，貼近實際發生順序。
+  if (role === 'problem_analysis') return -1;
+  if (role === 'baseline') return 0;
+  if (role === 'system') return 1;
+  if (role.startsWith('dfv:')) return 5;
+  if (role.startsWith('user:')) return 5.5;
+  if (role === 'verdict') return 6;
+  return 4;
+}
+
+function renderLanes() {
+  const byRole = {};
+  const order = [];
+  currentEvents.forEach((e, idx) => {
+    const role = e.role || 'system';
+    if (!(role in byRole)) { byRole[role] = []; order.push(role); }
+    byRole[role].push(idx);
+  });
+  document.getElementById('lanesEmpty').style.display = order.length ? 'none' : 'block';
+  order.sort((a, b) => laneOrder(a) - laneOrder(b) || a.localeCompare(b));
+
+  document.getElementById('lanes').innerHTML = order.map(role => {
+    const idxs = byRole[role];
+    const color = roleColor(role);
+    const name = roleDisplayName(role);
+    const personaMeta = PERSONAS.find(p => p.name === name);
+    const roleLabel = personaMeta ? personaMeta.role : (role.startsWith('dfv:') ? 'DFV 評審' : (role === 'baseline' ? 'Baseline 對照組' : (role === 'verdict' ? 'AI 對照評語' : '系統')));
+    const avatar = avatarHtml(personaMeta ? personaMeta.id : role, name);
+    const chips = idxs.map(idx => {
+      const e = currentEvents[idx];
+      const sel = idx === selectedEventIdx ? ' selected' : '';
+      return `<span class="chip${sel}" data-idx="${idx}" style="border-color:${color}44" onclick="selectEvent(${idx})">${esc(e.action)}</span>`;
+    }).join('');
+    return `<div class="lane">
+      <div class="lane-head">${avatar}<div class="lane-head-text"><div class="lane-name" style="color:${color}">${esc(name)}</div><div class="lane-role">${esc(roleLabel)}</div></div></div>
+      <div class="lane-chips">${chips}</div>
+    </div>`;
+  }).join('');
+}
+
+window.selectEvent = function (idx) {
+  selectedEventIdx = idx;
+  const e = currentEvents[idx];
+  document.getElementById('detailPanel').innerHTML = `
+    <div class="role" style="color:${roleColor(e.role || 'system')}">${esc(e.role)} — ${esc(e.node)} / ${esc(e.action)}</div>
+    <div class="summary-line">${esc(e.summary || '')}</div>
+    ${renderDetail(e)}`;
+  renderLanes();
+};
+
+function setStatusBadge(status) {
+  const el = document.getElementById('liveStatusBadge');
+  el.textContent = status;
+  el.className = 'status-badge status-' + status;
+}
+
+let hitlSelectedIdeaId = null;
+
+function showHitl(payload) {
+  document.getElementById('hitlPanel').style.display = 'block';
+  const nameInput = document.getElementById('hitlDisplayName');
+  if (!nameInput.value) nameInput.value = localStorage.getItem('hitlDisplayName') || '';
+  document.getElementById('hitlPrompt').textContent = payload.prompt || '';
+  const ideas = payload.ideas || [];
+  hitlSelectedIdeaId = ideas.length ? ideas[0].id : null;
+  renderHitlIdeas(ideas);
+  document.getElementById('hitlQuestions').textContent = `已經問過 ${payload.questions_asked_so_far || 0} 題`;
+  document.getElementById('hitlQuestionInput').value = '';
+}
+
+function renderHitlIdeas(ideas) {
+  document.getElementById('hitlIdeas').innerHTML = ideas.map(idea => {
+    const sel = idea.id === hitlSelectedIdeaId ? ' selected' : '';
+    return `<div class="idea-pick-card${sel}" data-idea-id="${esc(idea.id)}" onclick="selectHitlIdea(this.dataset.ideaId)">
+      <div style="font-weight:700;color:#e8ecf4;">${esc(idea.persona_name)}：《${esc(idea.title)}》</div>
+      <div style="color:#c4cbe0;font-size:0.85rem;margin-top:4px;">${esc(idea.summary || '')}</div>
+      <div style="color:#8a93a6;font-size:0.8rem;margin-top:4px;">${esc(idea.rationale || '')}</div>
+    </div>`;
+  }).join('');
+}
+window.selectHitlIdea = function (ideaId) {
+  hitlSelectedIdeaId = ideaId;
+  document.querySelectorAll('#hitlIdeas .idea-pick-card').forEach(el => {
+    el.classList.toggle('selected', el.dataset.ideaId === ideaId);
+  });
+};
+function hideHitl() { document.getElementById('hitlPanel').style.display = 'none'; }
+
+async function resumeRun(action, question) {
+  hideHitl();
+  setStatusBadge('running');
+  const body = { action };
+  if (question) {
+    body.question = question;
+    body.target_idea_id = hitlSelectedIdeaId;
+    // 不做真的身份驗證，只是讓 human_qa_log 知道「誰問的」——存在
+    // localStorage，下次開面板還記得上次填過的名字。
+    const name = document.getElementById('hitlDisplayName').value.trim();
+    if (name) localStorage.setItem('hitlDisplayName', name);
+    body.asked_by = name || null;
+  }
+  const res = await fetch(`/api/runs/${currentRunId}/resume`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  if (!res.ok) { const err = await res.json(); alert('resume 失敗：' + (err.detail || res.status)); return; }
+  reconnectEvents();
+}
+document.getElementById('btnAsk').addEventListener('click', () => {
+  const q = document.getElementById('hitlQuestionInput').value.trim();
+  if (!q) { resumeRun('skip'); return; }
+  resumeRun('ask', q);
+});
+document.getElementById('btnSkip').addEventListener('click', () => resumeRun('skip'));
+
+async function openLiveRun(runId, topic) {
+  currentRunId = runId;
+  currentEvents = [];
+  selectedEventIdx = null;
+  PERSONAS = [];
+  USERS = [];
+  document.getElementById('liveTopic').textContent = topic || runId;
+  document.getElementById('liveRunId').textContent = runId;
+  document.getElementById('detailPanel').innerHTML = '<div class="role">點一個事件方塊看完整內容</div>';
+  hideHitl();
+  await loadRunConfig(runId);  // 先拿到這場 run 實際用的 personas/users，事件才會從第一筆開始就正確解析成姓名/人物設定
+  reconnectEvents();
+}
+
+// 使用者要求即時畫面也要看得到每個環節的 token cost 以及累計 cost，還有
+// human-in-the-loop 之外各環節的耗時跟累計耗時——「不含 HITL 等待」是關鍵：
+// stage12 沒有 facilitator，唯一的人類介入點是 ask_question：`draft_idea`
+// 全部發想完或前一次 `human_qa` 回答完之後，會停在 ask_question 等真人
+// 決定要不要提問，resume 後下一筆事件是 `human_qa`（有提問）或
+// `dfv_score`（跳過，進 DFV 評分）——這段真人考慮的時間不算進「agent
+// 實際花的時間」。實測踩到的坑：這裡如果沿用 stage9 那份用
+// facilitator_decide 判斷的舊邏輯，stage12 完全沒有 facilitator 這個
+// role，判斷式永遠是 false，會把每次真人停頓的等待時間也整段算進
+// 累計耗時，跟「5 分鐘 demo」這個目標的計時完全對不上。
+let totalElapsedMs = 0;
+let lastEvent = null;
+
+function isHitlWaitGap(prev, cur) {
+  if (!prev) return false;
+  const prevIsPreQuestion = prev.action === 'draft_idea' || prev.action === 'human_qa';
+  const curIsPostQuestion = cur.action === 'human_qa' || cur.action === 'dfv_score';
+  return prevIsPreQuestion && curIsPostQuestion;
+}
+
+function fmtSeconds(ms) {
+  if (ms < 1000) return Math.round(ms) + 'ms';
+  return (ms / 1000).toFixed(1) + 's';
+}
+
+function updateStats(e) {
+  const costBefore = sumDisplayCost(currentEvents.slice(0, -1), STAGE12_COST_SNAPSHOT_ACTIONS);
+  const costNow = sumDisplayCost(currentEvents, STAGE12_COST_SNAPSHOT_ACTIONS);
+  document.getElementById('statStepCost').textContent = '$' + (costNow - costBefore).toFixed(4);
+  document.getElementById('statTotalCost').textContent = '$' + costNow.toFixed(4);
+
+  const curMs = new Date(e.ts).getTime();
+  let stepMs = 0;
+  if (lastEvent) {
+    const prevMs = new Date(lastEvent.ts).getTime();
+    stepMs = curMs - prevMs;
+    if (!isHitlWaitGap(lastEvent, e)) totalElapsedMs += stepMs;
+  }
+  lastEvent = e;
+  document.getElementById('statStepTime').textContent = fmtSeconds(stepMs);
+  document.getElementById('statTotalTime').textContent = fmtSeconds(totalElapsedMs);
+}
+
+function reconnectEvents() {
+  if (currentEventSource) currentEventSource.close();
+  currentEvents = [];
+  Object.keys(nodeLastSeen).forEach(k => delete nodeLastSeen[k]);
+  Object.keys(nodeCost).forEach(k => delete nodeCost[k]);
+  totalElapsedMs = 0;
+  lastEvent = null;
+  ['statStepCost', 'statTotalCost'].forEach(id => document.getElementById(id).textContent = '$0.0000');
+  ['statStepTime', 'statTotalTime'].forEach(id => document.getElementById(id).textContent = '0s');
+  renderLanes();
+  hideReport();
+  const es = new EventSource(`/api/runs/${currentRunId}/events`);
+  currentEventSource = es;
+  es.onmessage = (ev) => {
+    const e = JSON.parse(ev.data);
+    currentEvents.push(e);
+    updateStats(e);
+    // stage12 的訪談對象／腦力激盪參與者／最終評估者三組人都是
+    // analyze_and_scope／generate_personas／generate_evaluators 動態生成
+    // ——loadRunConfig() 在頁面一開始載入時抓到的 config_snapshot.json
+    // 有可能還是（這些節點跑完之前寫的）舊的保底名單快照，這裡撞到對應
+    // 事件就直接用真正動態生成的名單覆蓋 PERSONAS/USERS，事件細節裡的
+    // persona_id／user_id 才能正確解析成對得上的姓名，不會因為快照時機
+        // 差而對不起來。訪談對象跟最終評估者都是「使用者」身分，合併進
+    // 同一份 USERS 清單（id 前綴 u.../e... 不會互相覆蓋）。
+    if (e.action === 'analyze_and_scope' && e.extra && e.extra.interviewees && e.extra.interviewees.length) {
+      USERS = [...e.extra.interviewees, ...USERS.filter(u => !e.extra.interviewees.some(i => i.id === u.id))];
+    }
+    if (e.action === 'generate_personas' && e.extra && e.extra.personas && e.extra.personas.length) {
+      PERSONAS = e.extra.personas;
+    }
+    if (e.action === 'generate_evaluators' && e.extra && e.extra.evaluators && e.extra.evaluators.length) {
+      USERS = [...USERS.filter(u => !e.extra.evaluators.some(v => v.id === u.id)), ...e.extra.evaluators];
+    }
+    const sup = e.node && supervisorNodeFor(e.node);
+    if (sup) {
+      nodeLastSeen[sup] = Date.now();
+      if (!STAGE12_COST_SNAPSHOT_ACTIONS.has(e.action)) {
+        nodeCost[sup] = (nodeCost[sup] || 0) + (e.cost_usd || 0);
+      }
+    }
+    renderLanes();
+    renderTopo();
+  };
+  es.addEventListener('state', (ev) => {
+    const state = JSON.parse(ev.data);
+    setStatusBadge(state.status);
+    if (state.status === 'paused' && state.payload) showHitl(state.payload);
+    else hideHitl();
+    if (state.status === 'error') {
+      document.getElementById('detailPanel').innerHTML = `<div class="role" style="color:#ff6b9d">發生錯誤</div><pre>${esc(state.message || '')}</pre>`;
+    }
+    if (state.status === 'done') loadReport(currentRunId);
+    es.close();
+  });
+  es.onerror = () => {
+    // 一定要主動 close：EventSource 預設連線斷了會自動重連，但伺服器端的
+    // /events 每次新連線都是從 events.jsonl 開頭重播全部事件（見
+    // server.py stream_events 的設計，reconnectEvents() 本來就是靠這個
+    // 「每次連線=完整重播」的語意來處理 resume 之後要接新 subprocess），
+    // 如果讓瀏覽器自動重連、又沒有搭配 reconnectEvents() 清空
+    // currentEvents，onmessage 會把整份事件重新 push 一次，泳道會整批
+    // 出現重複的事件方塊。
+    es.close();
+  };
+  setStatusBadge('running');
+}
+
+// ---------- 最終報告（第 14 點：即時畫面＋歷史紀錄都要看得到）----------
+// stage12 沒有 stage10 風格的完整事件回放頁（見 server.py 開頭說明）
+// ——跑完後用這份報告 .md 內容直接嵌進頁面顯示就足夠。
+function hideReport() {
+  document.getElementById('reportCard').style.display = 'none';
+}
+async function loadReport(runId) {
+  const res = await fetch(`/api/runs/${runId}/report`);
+  if (!res.ok) return;
+  const text = await res.text();
+  document.getElementById('reportBody').textContent = text;
+  document.getElementById('reportOpenRaw').href = `/api/runs/${runId}/report`;
+  document.getElementById('reportCard').style.display = 'block';
+}
+
+// ---------- 歷史紀錄 ----------
+async function loadHistory() {
+  const res = await fetch('/api/runs');
+  const runs = await res.json();
+  const tbody = document.getElementById('runsTableBody');
+  document.getElementById('runsEmpty').style.display = runs.length ? 'none' : 'block';
+  // 用 data-* 屬性存 run_id/topic/status，不要把使用者打的主題字串直接內插
+  // 進 onclick="fn('...')" 這種寫法——主題是使用者自己打的任意文字，萬一
+  // 剛好含有雙引號會把整個屬性截斷，含有單引號則會把內嵌的 JS 字串提前
+  // 結束，兩層跳脫（HTML 屬性 + JS 字串常值）疊在一起很容易漏掉某個情況；
+  // data-* 屬性只需要處理 HTML 屬性這一層跳脫，讀取時走 dataset 也不用
+  // 再解析任何東西。
+  tbody.innerHTML = runs.map(r => `
+    <tr data-run-id="${esc(r.run_id)}" data-topic="${esc(r.topic || '')}" data-status="${esc(r.status)}" class="run-row">
+      <td>${esc(r.topic || r.run_id)}</td>
+      <td><span class="status-badge status-${esc(r.status)}">${esc(r.status)}</span></td>
+      <td>${esc((r.created_at || '').replace('T', ' ').slice(0, 19))}</td>
+      <td>${r.status === 'done' ? '查看報告 ↗' : '看即時進度 →'}</td>
+    </tr>`).join('');
+  tbody.querySelectorAll('.run-row').forEach(row => {
+    row.addEventListener('click', () => {
+      openHistoryRun(row.dataset.runId, row.dataset.topic, row.dataset.status);
+    });
+  });
+}
+function openHistoryRun(runId, topic, status) {
+  if (status === 'done') { window.open(`/api/runs/${runId}/report`, '_blank'); return; }
+  switchView('live');
+  openLiveRun(runId, topic);
+}
+
+// ---------- 初始化 ----------
+loadPersonas();
+loadUsers();
+renderTopo();
+</script>
+</body></html>

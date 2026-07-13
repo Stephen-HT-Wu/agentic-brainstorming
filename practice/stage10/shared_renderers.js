@@ -27,8 +27,14 @@
 // COST_SNAPSHOT_ACTIONS 是同一套邏輯——stage11 即時畫面要顯示即時成本，
 // 需要同一套排除規則，不是只有離線回放才用得到。
 const COST_SNAPSHOT_ACTIONS = new Set(['interview_turn', 'generate_prototype', 'test_prototype']);
-function sumDisplayCost(events) {
-  return events.reduce((s, e) => s + (COST_SNAPSHOT_ACTIONS.has(e.action) ? 0 : (e.cost_usd || 0)), 0);
+// exclude 預設是 stage9/10/11 那份排除清單，可選帶入覆寫——stage12 的
+// generate_prototype 是單次生成、只有一筆 emit_event（不像 stage9 的
+// generate_prototype_and_test 是「生成→測試→修正」三步驟共用一個
+// invocation，中間那筆快照事件才需要排除），沿用同一份排除清單反而會把
+// stage12 唯一一筆原型花費也錯誤地歸零；stage12 自己的排除清單見
+// stage12/static/index.html 的 STAGE12_COST_SNAPSHOT_ACTIONS。
+function sumDisplayCost(events, exclude = COST_SNAPSHOT_ACTIONS) {
+  return events.reduce((s, e) => s + (exclude.has(e.action) ? 0 : (e.cost_usd || 0)), 0);
 }
 
 function escapeHtml(s) {
@@ -286,6 +292,63 @@ function renderExtraGeneric(action, extra) {
         renderProposal(extra.baseline_proposal, 'Baseline 提案', { unverified: true });
     case 'generate_final_verdict':
       return block('AI 對照評語（agent 流程 vs baseline）', extra.verdict ? `<p>${esc(extra.verdict)}</p>` : '');
+    case 'baseline':
+      // 使用者要求在即時畫面就看得到 baseline 的完整敘事＋BMC（第 13
+      // 點），不用等會議跑完——stage12 的 run_baseline() 把完整
+      // proposal（含 BMC）放進 extra，跟 user_evaluation_summary 裡的
+      // baseline_proposal 一樣用 renderProposal() 呈現，標記 unverified
+      // （baseline 沒有經過訪談洞見驗證，是直接問 LLM 的對照組）。
+      return renderProposal(extra.proposal, 'Baseline（直接問 LLM，沒有經過訪談洞見驗證）', { unverified: true });
+    // ---- stage12（簡化版腦力激盪）專屬事件 ----
+    case 'analyze_and_scope':
+      // stage12 把「問題陳述」換成「先選策略目標 + target audience，再
+      // 依此動態生成訪談對象」——跟舊版 analyze_problem 的欄位形狀不同
+      // （多了 strategic_goal/target_audience，沒有 problem_statement），
+      // 不能沿用同一個 case。
+      return block('五力分析', ul(Object.entries(extra.five_forces || {}).map(([k, v]) => `${k}：${v}`))) +
+        block('趨勢分析（科技/環境/人口結構/世代價值觀）', extra.trend_analysis ? `<p>${esc(extra.trend_analysis)}</p>` : '') +
+        block('策略目標', extra.strategic_goal ? `<p>${esc(extra.strategic_goal)}</p>` : '') +
+        block('Target Audience', extra.target_audience ? `<p>${esc(extra.target_audience)}</p>` : '') +
+        block('動態生成的訪談對象', (extra.interviewees || []).map(u =>
+          `<div class="quote"><b>${esc(u.name)}</b>${u.age ? '（' + esc(u.age) + ' 歲）' : ''}<br>${esc(u.context || '')}</div>`).join('')) +
+        (extra.used_fallback_interviewees ? '<div class="detail-note">分析解析失敗，已退回既有預設訪談名單。</div>' : '');
+    case 'system_research':
+      // 訪談逐字稿本身透過 interview_turn 事件各自顯示，這裡是訪談結束
+      // 後萃取的洞見＋全場共用一份的 BMC（第 1 點：persona 各自的 idea
+      // 不再各自帶 BMC）。
+      return block('訪談洞見', ul((extra.insights || []).map(i => i.text))) +
+        block('共用 Business Model Canvas', renderBmc(extra.bmc || {}));
+    case 'generate_personas':
+      return block('動態生成的腦力激盪參與者', (extra.personas || []).map(p =>
+        `<div class="quote"><b>${esc(p.name)}</b>（${esc(p.role || '')}）<br>${esc(p.background || '')}</div>`).join('')) +
+        (extra.used_fallback_personas ? '<div class="detail-note">生成解析失敗或人數不足，已退回既有預設人設。</div>' : '');
+    case 'generate_evaluators':
+      return block('動態生成的最終評估者（跟訪談對象同一 target audience，但不重複個體）', (extra.evaluators || []).map(u =>
+        `<div class="quote"><b>${esc(u.name)}</b>${u.age ? '（' + esc(u.age) + ' 歲）' : ''}<br>${esc(u.context || '')}</div>`).join('')) +
+        (extra.used_fallback_evaluators ? '<div class="detail-note">生成解析失敗或人數不足，已退回既有預設用戶名單（已排除訪談對象）。</div>' : '');
+    case 'draft_idea': {
+      // 每位 persona 獨立發想一個 idea 就結束（第 8 點：不互評、不自己
+      // 改），沒有 stage9 那種 refine/co_create 的多輪版本可看，這裡直接
+      // 顯示完整 idea 內容。
+      const idea = extra.idea || {};
+      return block(`《${idea.title || ''}》`, idea.summary ? `<p>${esc(idea.summary)}</p>` : '') +
+        block('理由', idea.rationale ? `<p>${esc(idea.rationale)}</p>` : '') +
+        kv('引用的訪談洞見', (idea.insight_refs || []).join('、')) +
+        block('引用來源', renderResearchItems(idea.sources));
+    }
+    case 'dfv_score':
+      // DFV（Desirability/Feasibility/Viability）三面向評審之一——每次
+      // 呼叫只評一個面向，保留原本一大段文字批評（使用者確認的 Q4）。
+      return kv('面向', extra.lens_name) + kv('對象', extra.persona_name) + kv('分數（0-10）', extra.score) +
+        block('批評', extra.critique ? `<p>${esc(extra.critique)}</p>` : '');
+    case 'pick_winner':
+      return block('各 idea 總分（三面向加總）', ul(Object.entries(extra.totals || {}).map(([id, score]) => `${personaName(id)}：${Number(score).toFixed(1)} 分`))) +
+        kv('贏家', extra.winner_idea ? `${extra.winner_idea.persona_name}《${extra.winner_idea.title}》` : '') +
+        kv('idea 多樣性（平均 pairwise 距離，0-1，越高代表越是真正各自獨立發散）', extra.idea_diversity && extra.idea_diversity.avg_distance != null ? extra.idea_diversity.avg_distance : '');
+    case 'generate_prototype':
+      // extra.prototype 是完整原型物件（含共用 BMC），不用等回放頁——
+      // stage12 沒有 stage10 風格的完整事件回放頁，這裡直接渲染。
+      return renderPrototype(extra.prototype) + block('共用 Business Model Canvas', renderBmc((extra.prototype && extra.prototype.bmc) || {}));
     default:
       return '<pre>' + escapeHtml(JSON.stringify(extra, null, 2)) + '</pre>';
   }
