@@ -1740,13 +1740,36 @@ def build_final_report_markdown(
     user_evaluation: dict,
     final_verdict: str = "",
 ) -> str:
+    # 使用者要求報告裡重要的是「角色」，不是單純的人名——同一個名字對讀者
+    # 沒有意義，只有搭配 persona 的專業角色／訪談對象的身份與情境，才看得
+    # 出「這個 idea 是從什麼角度想出來的」「這個訪談洞見是誰在什麼處境下
+    # 說的」。這裡建兩份 name -> 角色描述的對照表，讓後面每一處提到人名的
+    # 地方都能順手帶出角色，不用每次重複寫查表邏輯。
+    role_by_persona_name = {p.get("name"): p.get("role", "") for p in personas}
+
+    def _person_role_label(person: dict) -> str:
+        age = person.get("age")
+        context = person.get("context", "")
+        age_part = f"{age}歲，" if age else ""
+        return f"{age_part}{context}" if context else age_part.rstrip("，")
+
+    role_by_user_name = {u.get("name"): _person_role_label(u) for u in (list(interviewees) + list(evaluators))}
+
+    def _persona_with_role(name: str) -> str:
+        role = role_by_persona_name.get(name)
+        return f"{name}（{role}）" if role else name
+
+    def _user_with_role(name: str) -> str:
+        role = role_by_user_name.get(name)
+        return f"{name}（{role}）" if role else name
+
     L: List[str] = []
     L.append("# 簡化版腦力激盪最終報告\n")
     L.append(f"- **主題**：{topic}")
     L.append(f"- **Round ID**：{round_id}")
-    L.append(f"- **腦力激盪參與者**：{', '.join(p['name'] for p in personas)}")
-    L.append(f"- **訪談對象**：{', '.join(i['name'] for i in interviewees)}")
-    L.append(f"- **最終評估者**：{', '.join(e['name'] for e in evaluators)}\n")
+    L.append(f"- **腦力激盪參與者**：{'、'.join(_persona_with_role(p['name']) for p in personas)}")
+    L.append(f"- **訪談對象**：{'、'.join(_user_with_role(i['name']) for i in interviewees)}")
+    L.append(f"- **最終評估者**：{'、'.join(_user_with_role(e['name']) for e in evaluators)}\n")
     L.append("---\n")
 
     L.append("## 策略目標與問題定義（五力＋趨勢分析）\n")
@@ -1763,10 +1786,17 @@ def build_final_report_markdown(
     L.append("---\n")
 
     L.append("## 系統研究（訪談洞見＋共用 BMC）\n")
+    L.append("**受訪者側寫**（誰在什麼處境下說了這些話，比名字本身重要）：\n")
+    for i in interviewees:
+        pain = "、".join(i.get("pain_points") or [])
+        L.append(f"- {_user_with_role(i.get('name'))}" + (f"，痛點：{pain}" if pain else ""))
+    L.append("")
     L.append("系統對訪談對象做一次需求探索訪談，整合成洞見，並產生一份")
     L.append("**全場共用**的 BMC——後面每位參與者發想 idea 時都讀同一份")
     L.append("背景資料，不是各自畫各自的 BMC：\n")
     for t in interview_transcript:
+        # 側寫已經在上面列過一次，這裡逐輪引用就不用每行重複整段情境
+        # 描述，只留名字，避免每一輪都重複同一段文字造成閱讀疲勞。
         L.append(f"- [{t['user_name']} 第{t['round']}輪] Q：{t['question']} / A：{t['answer']}")
     L.append("")
     L.append("**萃取洞見**：\n")
@@ -1778,15 +1808,19 @@ def build_final_report_markdown(
     L.append("")
 
     L.append("## 腦力激盪參與者各自的 idea\n")
+    L.append("**參與者側寫**（各自帶著什麼專業角度發想，比名字本身重要）：\n")
+    for p in personas:
+        L.append(f"- {_persona_with_role(p.get('name'))}：{p.get('background', '')}")
+    L.append("")
     for idea in ideas:
-        L.append(f"### {idea.get('persona_name')}：《{idea.get('title', '')}》")
+        L.append(f"### {_persona_with_role(idea.get('persona_name'))}：《{idea.get('title', '')}》")
         L.append(f"{idea.get('summary', '')}")
         L.append(f"- 理由：{idea.get('rationale', '')}\n")
 
     L.append("## 人類提問記錄\n")
     if human_qa_log:
         for qa in human_qa_log:
-            L.append(f"**問 {qa['presenter_name']}**：{qa['question']}")
+            L.append(f"**問 {_persona_with_role(qa['presenter_name'])}**：{qa['question']}")
             L.append(f"> {qa['answer']}\n")
     else:
         L.append("（本場沒有人類提問，全程跳過）\n")
@@ -1796,18 +1830,18 @@ def build_final_report_markdown(
     for lens in DFV_LENSES:
         L.append(f"### {lens['name']}（{lens['angle']}）\n")
         for s in [s for s in dfv_scores if s["lens_id"] == lens["id"]]:
-            L.append(f"- **{name_by_id.get(s['idea_id'], s['idea_id'])}**：{s['score']} 分 — {s['critique']}")
+            L.append(f"- **{_persona_with_role(name_by_id.get(s['idea_id'], s['idea_id']))}**：{s['score']} 分 — {s['critique']}")
         L.append("")
 
     L.append("## 收斂結果\n")
     L.append(
-        f"總分最高：**{winner_idea.get('persona_name')}**《{winner_idea.get('title', '')}》"
+        f"總分最高：**{_persona_with_role(winner_idea.get('persona_name'))}**《{winner_idea.get('title', '')}》"
         f"（總分 {winner_idea.get('total_score', 0):.1f}）\n"
     )
     L.append(f"idea 多樣性（發想階段彼此的兩兩平均距離）：{idea_diversity.get('avg_distance')}\n")
 
     L.append("## Prototype\n")
-    L.append(f"**{prototype.get('persona_name')}**：《{prototype.get('title', '')}》")
+    L.append(f"**{_persona_with_role(prototype.get('persona_name'))}**：《{prototype.get('title', '')}》")
     L.append(f"{prototype.get('summary', '')}\n")
     L.append(f"原型：`{prototype.get('html_path')}`（可直接用瀏覽器開啟）\n")
 
@@ -1819,13 +1853,20 @@ def build_final_report_markdown(
     L.append("## 最終評估者對照評分（Prototype vs Baseline）\n")
     L.append(
         "動態生成、跟訪談對象不重複的最終評估者，在不知道哪個方案花了更多"
-        "功夫做出來的情況下，分別對兩個方案給意見＋0-10 分：\n"
+        "功夫做出來的情況下，分別對兩個方案給意見＋0-10 分（評估者是誰、"
+        "站在什麼情境給分，比名字本身重要）：\n"
     )
+    for e_profile in evaluators:
+        pain = "、".join(e_profile.get("pain_points") or [])
+        L.append(f"- {_user_with_role(e_profile.get('name'))}" + (f"，痛點：{pain}" if pain else ""))
+    L.append("")
     evaluations = user_evaluation.get("evaluations") or []
     if evaluations:
         L.append("| 評估者 | Prototype 評分 | Prototype 意見 | Baseline 評分 | Baseline 意見 |")
         L.append("|---|---|---|---|---|")
         for e in evaluations:
+            # 側寫已經在上面列過一次，表格欄位只留名字，不然每一列都重複
+            # 整段情境描述會讓表格塞爆、比對分數反而變難讀。
             L.append(
                 f"| {e['user_name']} | {e['agent_score']} | {e['agent_reaction']} "
                 f"| {e['baseline_score']} | {e['baseline_reaction']} |"
