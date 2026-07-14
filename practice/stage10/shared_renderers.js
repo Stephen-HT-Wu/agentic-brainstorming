@@ -314,10 +314,10 @@ function renderExtraGeneric(action, extra) {
         (extra.used_fallback_interviewees ? '<div class="detail-note">分析解析失敗，已退回既有預設訪談名單。</div>' : '');
     case 'system_research':
       // 訪談逐字稿本身透過 interview_turn 事件各自顯示，這裡是訪談結束
-      // 後萃取的洞見＋全場共用一份的 BMC（第 1 點：persona 各自的 idea
-      // 不再各自帶 BMC）。
-      return block('訪談洞見', ul((extra.insights || []).map(i => i.text))) +
-        block('共用 Business Model Canvas', renderBmc(extra.bmc || {}));
+      // 後萃取的洞見——真實跑測發現全場共用一份 BMC 會壓低點子多樣性
+      // （見 stage12/note.md），改成每位 persona 在 draft_idea 時自己
+      // 設計自己的 BMC，這裡不再顯示 BMC。
+      return block('訪談洞見', ul((extra.insights || []).map(i => i.text)));
     case 'generate_personas':
       return block('動態生成的腦力激盪參與者', (extra.personas || []).map(p =>
         `<div class="quote"><b>${esc(p.name)}</b>（${esc(p.role || '')}）<br>${esc(p.background || '')}</div>`).join('')) +
@@ -329,12 +329,14 @@ function renderExtraGeneric(action, extra) {
     case 'draft_idea': {
       // 每位 persona 獨立發想一個 idea 就結束（第 8 點：不互評、不自己
       // 改），沒有 stage9 那種 refine/co_create 的多輪版本可看，這裡直接
-      // 顯示完整 idea 內容。
+      // 顯示完整 idea 內容。BMC 是這位 persona 自己設計的一份（不是共用
+      // 範本，見 stage12/note.md 的多樣性發現），跟 idea 一起顯示。
       const idea = extra.idea || {};
       return block(`《${idea.title || ''}》`, idea.summary ? `<p>${esc(idea.summary)}</p>` : '') +
         block('理由', idea.rationale ? `<p>${esc(idea.rationale)}</p>` : '') +
         kv('引用的訪談洞見', (idea.insight_refs || []).join('、')) +
-        block('引用來源', renderResearchItems(idea.sources));
+        block('引用來源', renderResearchItems(idea.sources)) +
+        block('這位參與者自己設計的 Business Model Canvas', renderBmc(idea.bmc || {}));
     }
     case 'dfv_score':
       // DFV（Desirability/Feasibility/Viability）三面向評審之一——每次
@@ -346,9 +348,9 @@ function renderExtraGeneric(action, extra) {
         kv('贏家', extra.winner_idea ? `${extra.winner_idea.persona_name}《${extra.winner_idea.title}》` : '') +
         kv('idea 多樣性（平均 pairwise 距離，0-1，越高代表越是真正各自獨立發散）', extra.idea_diversity && extra.idea_diversity.avg_distance != null ? extra.idea_diversity.avg_distance : '');
     case 'generate_prototype':
-      // extra.prototype 是完整原型物件（含共用 BMC），不用等回放頁——
-      // stage12 沒有 stage10 風格的完整事件回放頁，這裡直接渲染。
-      return renderPrototype(extra.prototype) + block('共用 Business Model Canvas', renderBmc((extra.prototype && extra.prototype.bmc) || {}));
+      // extra.prototype 是完整原型物件（含贏家 idea 自己設計的 BMC，不是
+      // 共用範本），不用等回放頁——stage12 直接在即時畫面渲染。
+      return renderPrototype(extra.prototype) + block('贏家自己設計的 Business Model Canvas', renderBmc((extra.prototype && extra.prototype.bmc) || {}));
     default:
       return '<pre>' + escapeHtml(JSON.stringify(extra, null, 2)) + '</pre>';
   }

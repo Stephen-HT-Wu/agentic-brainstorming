@@ -103,14 +103,20 @@ if _env_file.exists():
 
 CHEAP_MODEL = "claude-haiku-4-5-20251001"
 SMART_MODEL = "claude-sonnet-5"
-client = anthropic.Anthropic(timeout=90.0)  # stage7 真實跑測踩過 3+ 小時網路卡死，見 stage7 note
+client = anthropic.Anthropic(timeout=90.0, max_retries=5)  # stage7 真實跑測踩過 3+ 小時網路卡死，見 stage7 note
+# 5-Whys 把訪談輪數從 2 拉到 5，一場會議的 LLM 呼叫量大增，撞到 Anthropic
+# API 暫時性過載（529 Overloaded）的機率也跟著變高——真實跑測撞過 SDK
+# 預設 max_retries=2 扛不過去、整場會議直接崩潰的情況，加大到 5 次重試
+# （SDK 內建指數退避＋jitter，不用自己刻重試迴圈）。
 
 DEDUP_SIMILARITY_THRESHOLD = 0.80
 EMBED_DIM = 256
-# 使用者要求降低成本＋5 分鐘內跑完：訪談輪數從 stage9 的 3 砍到 2，且
-# 訪談對象人數從動態範圍縮到固定 3 人，同時全部平行 fan-out（不是
-# stage9 那種所有 persona 各自輪流訪談全部使用者）。
-INTERVIEW_ROUNDS = 2
+# 使用者要求訪談改用 5-Whys 根本原因分析技巧、問滿 5 輪才能挖到夠深的
+# 洞見（原本為了省成本/趕 5 分鐘 demo 只問 2 輪，但訪談深度不夠也是點子
+# 多樣性偏低的一個原因——洞見太表面，大家很容易收斂到同一種顯而易見的
+# 解法）。訪談對象人數仍固定 3 人，全部平行 fan-out（不是 stage9 那種
+# 所有 persona 各自輪流訪談全部使用者）。
+INTERVIEW_ROUNDS = 5
 
 MAX_BUDGET_USD = 5.0
 
@@ -562,17 +568,23 @@ def simulate_user_answer(user: dict, question: str, prior_turns: List[dict]) -> 
     return call_llm(SMART_MODEL, system, prompt, max_tokens=300).strip()
 
 
-def generate_followup_question(persona: dict, prior_turns: List[dict]) -> str:
+def generate_followup_question(persona: dict, prior_turns: List[dict], round_i: int) -> str:
+    """使用者要求用 5-Whys 根本原因分析技巧（第 2 點）：不是每輪都在同一
+    層換句話問，而是針對對方剛剛的回答一路追問「為什麼」，一層一層往下
+    挖，愈後面的追問應該愈貼近根本原因/動機，不是重複前面問過的角度。"""
     last_answer = prior_turns[-1]["answer"]
     history = "\n".join(f"Q: {t['question']}\nA: {t['answer']}" for t in prior_turns)
     system = (
         f"你是 {persona['name']}，正在做用戶需求訪談（探索階段，不能提任何點子）。"
-        "根據對方剛剛的回答，問一個更深入的追問，聚焦在痛點或情境細節。"
-        "只輸出問題本身（<=30 字），不要加解說或引號。"
+        "用 5-Whys 根本原因分析技巧：針對對方剛剛的回答追問「為什麼」，"
+        f"一層一層往下挖掘表面症狀背後真正的根本原因或動機。這是第 {round_i}/"
+        f"{INTERVIEW_ROUNDS} 層追問，愈後面應該愈貼近根本原因，不要重複"
+        "前面問過的角度或只是換句話問同一層。只輸出問題本身（<=30 字），"
+        "不要加解說或引號。"
     )
-    prompt = f"訪談記錄：\n{history}\n\n對方剛回答：{last_answer}\n\n下一個追問？"
+    prompt = f"訪談記錄：\n{history}\n\n對方剛回答：{last_answer}\n\n下一層「為什麼」追問？"
     question = call_llm(SMART_MODEL, system, prompt, max_tokens=150).strip()
-    return question or f"能不能多說一點「{last_answer[:15]}」這件事？"
+    return question or f"能不能多說一點「{last_answer[:15]}」這件事，背後的原因是什麼？"
 
 
 # ---------------------------------------------------------------------------
@@ -650,10 +662,12 @@ def render_landing_page_html(data: dict, proposal: dict) -> str:
 def generate_prototype(state: MeetingState) -> dict:
     """使用者要求原型只生成一次，不測試不修正（第 2 點）——比 stage9
     `generate_prototype_and_test()` 少了『用模擬使用者測試再修正一次』
-    的迴圈，直接生成 landing page 就送去給評估者打分，沿用共用 BMC
-    （第 1 點：idea 沒有自己的 bmc）。"""
+    的迴圈，直接生成 landing page 就送去給評估者打分。BMC 現在是贏家
+    idea 自己在 `draft_one_idea` 時設計的那一份（不再是全場共用一份，
+    見 `system_research`/`draft_one_idea` 的說明——共用 BMC 被實測發現
+    會壓低點子多樣性）。"""
     idea = state["winner_idea"]
-    bmc = state["shared_bmc"]
+    bmc = idea.get("bmc") or {}
     proposal_like = {"title": idea.get("title"), "summary": idea.get("summary"), "bmc": bmc}
     role_token = _event_role.set(f"persona:{idea.get('persona_name')}")
     try:
@@ -708,16 +722,17 @@ class MeetingState(TypedDict):
     used_fallback_interviewees: bool
     research_queries: List[str]
     research_items: List[dict]
-    # system_research 產出：訪談逐字稿＋整合洞見＋全場共用一份 BMC
-    # （第 1、7 點：不再由每位 persona 各自做功課/訪談）
+    # system_research 產出：訪談逐字稿＋整合洞見（第 1、7 點：不再由每位
+    # persona 各自做功課/訪談；BMC 不在這裡產生——實測發現全場共用一份
+    # BMC 會壓低點子多樣性，改成每位 persona 在 draft_one_idea 時自己設計
+    # 自己的 BMC，見該函式的說明）
     interview_transcript: Annotated[List[dict], operator.add]
     insights: List[dict]
-    shared_bmc: dict
     # generate_personas 產出：依策略目標動態生成的腦力激盪參與者（第 2 點）
     personas: List[dict]
     used_fallback_personas: bool
-    # draft_ideas 產出：N 位 persona 各自獨立發想 1 個 idea，不含自己的
-    # bmc（第 1、7、8 點：不互評、不自己改）
+    # draft_ideas 產出：N 位 persona 各自獨立發想 1 個 idea，各自帶自己
+    # 設計的 bmc（第 7、8 點：不互評、不自己改，但 BMC 不再是共用一份）
     ideas: Annotated[List[dict], operator.add]
     # ask_question（HITL，僅保留的互動環節，第 3 點）
     pending_question: Optional[str]
@@ -883,8 +898,9 @@ def interview_one_person(task: IntervieweeTask) -> dict:
     ——這裡沿用 stage9 `simulate_user_answer`/`generate_followup_question`
     同一套訪談模擬機制，只是訪談者身份是「系統研究員」，不是某位 persona，
     而且 3 位訪談對象平行 fan-out（不是像 stage9 那樣所有 persona 各自
-    輪流訪談全部使用者），輪數也從 3 降到 2（第 4、5 點：demo 要快、
-    要省成本）。"""
+    輪流訪談全部使用者）。訪談改用 5-Whys 技巧問滿 5 輪（第 2 點）——
+    比原本 2 輪更花成本/時間，但目的是換到更深的根本原因洞見，不是表面
+    症狀，這是使用者在實測發現點子多樣性太低之後明確要求的取捨。"""
     interviewee = task["interviewee"]
     role_token = _event_role.set(f"user:{interviewee.get('name')}")
     transcript: List[dict] = []
@@ -894,7 +910,7 @@ def interview_one_person(task: IntervieweeTask) -> dict:
         for round_i in range(1, INTERVIEW_ROUNDS + 1):
             question = (
                 first_question if round_i == 1
-                else generate_followup_question(interviewer_persona, transcript)
+                else generate_followup_question(interviewer_persona, transcript, round_i)
             )
             answer = simulate_user_answer(interviewee, question, transcript)
             turn = {
@@ -925,10 +941,14 @@ interview_panel_graph = build_interview_panel_subgraph()
 
 def system_research(state: MeetingState) -> dict:
     """使用者要求把「每位 persona 各自做功課/訪談」整個改成系統做一次
-    （第 1、7 點）：3 位訪談對象平行受訪，訪談完再一次 LLM 呼叫萃取洞見＋
-    產生**全場共用一份**的 BMC（第 1 點確認：persona 各自發想的 idea
-    不再各自帶 BMC）。跟 `generate_personas` 是平行分支，兩者都只依賴
-    `analyze_and_scope` 的輸出，互不相依，在 `draft_ideas` 才 join。"""
+    （第 1、7 點）：3 位訪談對象平行受訪，訪談完再一次 LLM 呼叫萃取洞見。
+
+    真實跑測發現點子多樣性太低（三個 idea 兩兩平均距離常常低於「同一個
+    idea 換句話說」的基準值，見 note.md）——根因之一是全場共用同一份
+    BMC，等於先把商業模式框死了，每位 persona 只能在同一個框架裡想變化，
+    而不是各自從自己的角度重新想「這個策略目標到底該怎麼做生意」。改回
+    讓每位 persona 在 `draft_one_idea` 時自己設計 BMC（見該函式），這裡
+    不再產生任何 BMC，只做訪談萃取洞見這一件事。"""
     result = interview_panel_graph.invoke({
         "topic": state["topic"], "strategic_goal": state["strategic_goal"],
         "interviewees": state["interviewees"], "interview_transcript": [],
@@ -937,17 +957,11 @@ def system_research(state: MeetingState) -> dict:
 
     lines = "\n".join(f"[{t['user_name']}] Q:{t['question']} / A:{t['answer']}" for t in transcript)
     system = (
-        "你是產品研究員，剛完成訪談，現在要萃取洞見，並依這些洞見＋公司"
-        "策略目標，畫出一份 Business Model Canvas（給接下來的腦力激盪"
-        "團隊當共同背景資料，不是最終定案，之後不會再被個別修改）。"
-        "只輸出 JSON：{"
+        "你是產品研究員，剛完成訪談，現在要從逐字稿萃取洞見，給接下來的"
+        "腦力激盪團隊當背景資料（每位參與者會各自獨立解讀這些洞見，不是"
+        "只有一種標準答案）。只輸出 JSON：{"
         "\"insights\": [{\"id\":\"i1\",\"text\":\"一句話洞見，<=50字\"}]"
-        "（最多 5 則，每則必須具體可回溯到某位受訪者說的話，不要空泛通則），"
-        "\"bmc\": 物件，鍵必須恰好包含且僅包含這九個："
-        f"{json.dumps(BMC_KEYS, ensure_ascii=False)}"
-        "，其中「收益流」「成本結構」兩格必須是物件："
-        "{\"narrative\":\"<=40字\",\"monthly_estimate_twd\":數字（新台幣/月，"
-        "粗略估算即可）,\"basis\":\"<=50字估算依據\"}，其餘七格維持一句話文字}"
+        "（最多 5 則，每則必須具體可回溯到某位受訪者說的話，不要空泛通則）}"
     )
     user = (
         f"策略目標：{state['strategic_goal']}\n\ntarget audience：{state['target_audience']}\n\n"
@@ -967,20 +981,15 @@ def system_research(state: MeetingState) -> dict:
         raw_insights = [{"text": f"{t['user_name']}：{t['answer'][:50]}"} for t in transcript[:2]]
     insights = [{"id": f"i{n}", "text": it["text"].strip()} for n, it in enumerate(raw_insights, 1)]
 
-    bmc = _merge_bmc(data.get("bmc"), {})
-    if issues := assert_bmc_complete({"bmc": bmc}):
-        raise ValueError(f"共用 BMC 結構不變量失敗：{issues}")
-
     emit_event(
         "system_research",
         f"整合 {len(transcript)} 筆訪談逐字稿，萃取 {len(insights)} 則洞見",
-        extra={"insights": insights, "bmc": bmc},
+        extra={"insights": insights},
     )
-    print(f"  [system_research] 洞見 {len(insights)} 則，共用 BMC 已生成")
+    print(f"  [system_research] 洞見 {len(insights)} 則")
     return {
         "interview_transcript": transcript,
         "insights": insights,
-        "shared_bmc": bmc,
     }
 
 
@@ -1063,7 +1072,6 @@ class IdeaTask(TypedDict):
     strategic_goal: str
     target_audience: str
     insights: List[dict]
-    shared_bmc: dict
     research_items: List[dict]
 
 
@@ -1074,20 +1082,24 @@ def fan_out_ideas(state: MeetingState) -> List[Send]:
             "strategic_goal": state["strategic_goal"],
             "target_audience": state["target_audience"],
             "insights": state["insights"],
-            "shared_bmc": state["shared_bmc"],
             "research_items": state["research_items"],
         })
         for persona in state["personas"]
     ]
 
 
-_IDEA_SCHEMA_HINT = """
+_IDEA_SCHEMA_HINT = f"""
 只輸出一個 JSON 物件（不要 markdown 圍欄），欄位：
 - title: string（<=40字）
 - summary: string（2-3句，<=120字）
 - rationale: string（<=80字，說明這個 idea 怎麼呼應策略目標跟訪談洞見）
 - insight_refs: [string] 1-3 筆，必須是提供的洞見 id（例如 "i1"），不能捏造
-- sources: [{"title","url","how_used"}] 最多 2 筆 — url 必須來自提供的搜尋素材
+- sources: [{{"title","url","how_used"}}] 最多 2 筆 — url 必須來自提供的搜尋素材
+- bmc: 物件，這是「你自己」設計的 Business Model Canvas（不是共用範本，
+  別人可能畫出完全不同的版本），鍵必須恰好包含且僅包含這九個：
+  {json.dumps(BMC_KEYS, ensure_ascii=False)}，其中「收益流」「成本結構」
+  兩格必須是物件：{{"narrative":"<=40字","monthly_estimate_twd":數字（新台幣/月，
+  粗略估算即可）,"basis":"<=50字估算依據"}}，其餘七格維持一句話文字
 務必輸出精簡合法 JSON，避免長文導致截斷。
 """
 
@@ -1109,8 +1121,14 @@ def _parse_idea(text: str) -> dict:
 
 def draft_one_idea(task: IdeaTask) -> dict:
     """使用者要求刪掉互評/自己改（第 8 點）——每位 persona 獨立發想一個
-    idea 就結束，不會再被自己或別人修改。也刪掉 idea 自己的 bmc 欄位
-    （第 1 點確認：全場只有一份共用 BMC，由 `system_research` 產生）。"""
+    idea 就結束，不會再被自己或別人修改。
+
+    BMC 現在是每位 persona 自己設計的一份，不是共用範本（真實跑測發現：
+    全場共用一份 BMC 會把商業模式先框死，所有人只能在同一個框架裡想
+    變化，導致三個 idea 的多樣性量出來比「同一個 idea 換句話說」還低，
+    見 note.md）——這裡跟 idea 本身一起、同一次 LLM 呼叫產生，不多花
+    一次呼叫的成本，用 `_merge_bmc()` 保證結構合法（缺漏格用安全預設值
+    補，跟 stage9 對每位 persona 提案的既有慣例一致）。"""
     persona = task["persona"]
     role_token = _event_role.set(_persona_label(persona))
     try:
@@ -1118,23 +1136,23 @@ def draft_one_idea(task: IdeaTask) -> dict:
         sources_block = "\n".join(
             f"- {it.get('title')} | {it.get('url')}" for it in task["research_items"][:8]
         ) or "（無）"
-        bmc_block = json.dumps(task["shared_bmc"], ensure_ascii=False)
         system = (
             f"你是 {persona['name']}（{persona.get('role', '')}），背景：{persona.get('background', '')}。"
             f"關注：{', '.join(persona.get('focus') or [])}。發言風格：{persona.get('style', '')}。"
-            "獨立發想一個能實作這個策略目標的具體 idea——這是你自己的提案，"
-            "不用參考其他人的想法（現在還沒有其他人的提案）。必須明確呼應"
-            "提供的訪談洞見跟共用 BMC 背景，insight_refs 只能引用下面列出的"
-            "洞見 id，url 只能來自提供的搜尋素材，不能捏造連結。"
+            "獨立發想一個能實作這個策略目標的具體 idea，並自己設計一份支撐"
+            "這個 idea 的 Business Model Canvas——這是你自己的提案跟你自己"
+            "的商業模式判斷，不用參考其他人的想法（現在還沒有其他人的提案，"
+            "也沒有範本 BMC 可以照抄）。必須明確呼應提供的訪談洞見，"
+            "insight_refs 只能引用下面列出的洞見 id，url 只能來自提供的"
+            "搜尋素材，不能捏造連結。"
             + _IDEA_SCHEMA_HINT
         )
         user = (
             f"策略目標：{task['strategic_goal']}\n\ntarget audience：{task['target_audience']}\n\n"
-            f"共用 BMC（背景資料，不用你自己改，最終提案會沿用這一份）：\n{bmc_block}\n\n"
             f"可引用的訪談洞見：\n{insights_block}\n\n"
             f"可用搜尋素材：\n{sources_block}"
         )
-        raw = call_llm(SMART_MODEL, system, user, max_tokens=1200)
+        raw = call_llm(SMART_MODEL, system, user, max_tokens=1600)
         idea = _parse_idea(raw)
         known_ids = {i.get("id") for i in task["insights"] if i.get("id")}
         refs = [r for r in (idea.get("insight_refs") or []) if r in known_ids]
@@ -1144,6 +1162,7 @@ def draft_one_idea(task: IdeaTask) -> dict:
         idea["id"] = persona.get("id")
         idea["persona_id"] = persona.get("id")
         idea["persona_name"] = persona.get("name")
+        idea["bmc"] = _merge_bmc(idea.get("bmc"), {})
         emit_event(
             "draft_idea", f"{persona['name']} 提出《{idea.get('title', '')}》",
             role=_persona_label(persona), extra={"idea": idea},
@@ -1653,7 +1672,6 @@ def save_outputs(
     used_fallback_interviewees: bool,
     interview_transcript: List[dict],
     insights: List[dict],
-    shared_bmc: dict,
     personas: List[dict],
     used_fallback_personas: bool,
     ideas: List[dict],
@@ -1683,7 +1701,6 @@ def save_outputs(
         "used_fallback_interviewees": used_fallback_interviewees,
         "interview_transcript": interview_transcript,
         "insights": insights,
-        "shared_bmc": shared_bmc,
         "personas": personas,
         "used_fallback_personas": used_fallback_personas,
         "ideas": ideas,
@@ -1726,7 +1743,6 @@ def build_final_report_markdown(
     used_fallback_interviewees: bool,
     interview_transcript: List[dict],
     insights: List[dict],
-    shared_bmc: dict,
     personas: List[dict],
     ideas: List[dict],
     human_qa_log: List[dict],
@@ -1785,15 +1801,18 @@ def build_final_report_markdown(
         L.append("（訪談對象因分析解析失敗退回既有預設名單）\n")
     L.append("---\n")
 
-    L.append("## 系統研究（訪談洞見＋共用 BMC）\n")
+    L.append("## 系統研究（訪談洞見，5-Whys 深度追問）\n")
     L.append("**受訪者側寫**（誰在什麼處境下說了這些話，比名字本身重要）：\n")
     for i in interviewees:
         pain = "、".join(i.get("pain_points") or [])
         L.append(f"- {_user_with_role(i.get('name'))}" + (f"，痛點：{pain}" if pain else ""))
     L.append("")
-    L.append("系統對訪談對象做一次需求探索訪談，整合成洞見，並產生一份")
-    L.append("**全場共用**的 BMC——後面每位參與者發想 idea 時都讀同一份")
-    L.append("背景資料，不是各自畫各自的 BMC：\n")
+    L.append("系統對訪談對象做一次需求探索訪談，用 5-Whys 技巧一路往下追問")
+    L.append("根本原因（不是每一輪都問同一層的表面問題），整合訪談逐字稿萃取")
+    L.append("成洞見——這份洞見是每位參與者共同的背景資料，但**BMC 不再是")
+    L.append("這裡產生的共用範本**：每位參與者會依這些洞見，各自設計自己的")
+    L.append("商業模式（見下一節），實測發現共用一份 BMC 會把商業模式先框死，")
+    L.append("導致大家想出來的 idea 多樣性偏低（見 note.md）：\n")
     for t in interview_transcript:
         # 側寫已經在上面列過一次，這裡逐輪引用就不用每行重複整段情境
         # 描述，只留名字，避免每一輪都重複同一段文字造成閱讀疲勞。
@@ -1802,12 +1821,9 @@ def build_final_report_markdown(
     L.append("**萃取洞見**：\n")
     for i in insights:
         L.append(f"- [{i['id']}] {i['text']}")
-    L.append("\n**共用 BMC**：\n")
-    for k in BMC_KEYS:
-        L.append(f"- {k}：{_format_bmc_line(k, (shared_bmc or {}).get(k))}")
     L.append("")
 
-    L.append("## 腦力激盪參與者各自的 idea\n")
+    L.append("## 腦力激盪參與者各自的 idea（各自設計自己的 BMC）\n")
     L.append("**參與者側寫**（各自帶著什麼專業角度發想，比名字本身重要）：\n")
     for p in personas:
         L.append(f"- {_persona_with_role(p.get('name'))}：{p.get('background', '')}")
@@ -1816,6 +1832,10 @@ def build_final_report_markdown(
         L.append(f"### {_persona_with_role(idea.get('persona_name'))}：《{idea.get('title', '')}》")
         L.append(f"{idea.get('summary', '')}")
         L.append(f"- 理由：{idea.get('rationale', '')}\n")
+        L.append("**這位參與者自己設計的 Business Model Canvas**：\n")
+        for k in BMC_KEYS:
+            L.append(f"- {k}：{_format_bmc_line(k, (idea.get('bmc') or {}).get(k))}")
+        L.append("")
 
     L.append("## 人類提問記錄\n")
     if human_qa_log:
@@ -2083,7 +2103,6 @@ def main() -> None:
             "research_items": [],
             "interview_transcript": [],
             "insights": [],
-            "shared_bmc": {},
             "personas": [],
             "used_fallback_personas": False,
             "ideas": [],
@@ -2156,7 +2175,7 @@ def main() -> None:
         five_forces=final_state["five_forces"], trend_analysis=final_state["trend_analysis"],
         interviewees=interviewees, used_fallback_interviewees=final_state["used_fallback_interviewees"],
         interview_transcript=final_state["interview_transcript"], insights=final_state["insights"],
-        shared_bmc=final_state["shared_bmc"], personas=personas,
+        personas=personas,
         used_fallback_personas=final_state["used_fallback_personas"], ideas=ideas,
         human_qa_log=human_qa_log, dfv_scores=dfv_scores,
         winner_idea=winner_idea, idea_diversity=idea_diversity,
@@ -2173,7 +2192,7 @@ def main() -> None:
         five_forces=final_state["five_forces"], trend_analysis=final_state["trend_analysis"],
         interviewees=interviewees, used_fallback_interviewees=final_state["used_fallback_interviewees"],
         interview_transcript=final_state["interview_transcript"], insights=final_state["insights"],
-        shared_bmc=final_state["shared_bmc"], personas=personas, ideas=ideas,
+        personas=personas, ideas=ideas,
         human_qa_log=human_qa_log, dfv_scores=dfv_scores,
         winner_idea=winner_idea, idea_diversity=idea_diversity,
         prototype=prototype, evaluators=evaluators,

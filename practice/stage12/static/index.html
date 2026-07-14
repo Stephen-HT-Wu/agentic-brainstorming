@@ -202,7 +202,10 @@
     <div class="card" id="reportCard" style="display:none;">
       <div class="row" style="justify-content:space-between;margin-bottom:10px;">
         <div style="font-weight:700;">最終報告</div>
-        <a id="reportOpenRaw" href="#" target="_blank" class="secondary" style="text-decoration:none;padding:8px 14px;border-radius:8px;border:1px solid #2a3557;color:#c4cbe0;font-size:0.85rem;">開新分頁看原始 .md ↗</a>
+        <div class="row" style="gap:8px;">
+          <a id="reportOpenReplay" href="#" target="_blank" class="secondary" style="text-decoration:none;padding:8px 14px;border-radius:8px;border:1px solid #2a3557;color:#c4cbe0;font-size:0.85rem;">開啟完整回放 ↗</a>
+          <a id="reportOpenRaw" href="#" target="_blank" class="secondary" style="text-decoration:none;padding:8px 14px;border-radius:8px;border:1px solid #2a3557;color:#c4cbe0;font-size:0.85rem;">開新分頁看原始 .md ↗</a>
+        </div>
       </div>
       <pre id="reportBody" style="white-space:pre-wrap;word-break:break-word;font-family:inherit;font-size:0.88rem;color:#c4cbe0;max-height:480px;overflow-y:auto;margin:0;"></pre>
     </div>
@@ -803,9 +806,10 @@ function reconnectEvents() {
   setStatusBadge('running');
 }
 
-// ---------- 最終報告（第 14 點：即時畫面＋歷史紀錄都要看得到）----------
-// stage12 沒有 stage10 風格的完整事件回放頁（見 server.py 開頭說明）
-// ——跑完後用這份報告 .md 內容直接嵌進頁面顯示就足夠。
+// ---------- 最終報告 ＋ 完整回放（第 14 點：即時畫面＋歷史紀錄都要看
+// 得到）----------
+// 兩種「回顧」方式互補：報告 .md 直接看結論，完整回放頁
+// （stage12/build_replay.py）逐步重播每一步事件＋結構化差異對照表。
 function hideReport() {
   document.getElementById('reportCard').style.display = 'none';
 }
@@ -815,6 +819,7 @@ async function loadReport(runId) {
   const text = await res.text();
   document.getElementById('reportBody').textContent = text;
   document.getElementById('reportOpenRaw').href = `/api/runs/${runId}/report`;
+  document.getElementById('reportOpenReplay').href = `/api/runs/${runId}/replay`;
   document.getElementById('reportCard').style.display = 'block';
 }
 
@@ -830,13 +835,20 @@ async function loadHistory() {
   // 結束，兩層跳脫（HTML 屬性 + JS 字串常值）疊在一起很容易漏掉某個情況；
   // data-* 屬性只需要處理 HTML 屬性這一層跳脫，讀取時走 dataset 也不用
   // 再解析任何東西。
-  tbody.innerHTML = runs.map(r => `
-    <tr data-run-id="${esc(r.run_id)}" data-topic="${esc(r.topic || '')}" data-status="${esc(r.status)}" class="run-row">
+  tbody.innerHTML = runs.map(r => {
+    const runId = esc(r.run_id);
+    const actions = r.status === 'done'
+      ? `<a href="/api/runs/${runId}/replay" target="_blank" onclick="event.stopPropagation()" style="color:#8fb0ff;">完整回放 ↗</a>`
+        + ` · <a href="/api/runs/${runId}/report" target="_blank" onclick="event.stopPropagation()" style="color:#8fb0ff;">報告 ↗</a>`
+      : '看即時進度 →';
+    return `
+    <tr data-run-id="${runId}" data-topic="${esc(r.topic || '')}" data-status="${esc(r.status)}" class="run-row">
       <td>${esc(r.topic || r.run_id)}</td>
       <td><span class="status-badge status-${esc(r.status)}">${esc(r.status)}</span></td>
       <td>${esc((r.created_at || '').replace('T', ' ').slice(0, 19))}</td>
-      <td>${r.status === 'done' ? '查看報告 ↗' : '看即時進度 →'}</td>
-    </tr>`).join('');
+      <td>${actions}</td>
+    </tr>`;
+  }).join('');
   tbody.querySelectorAll('.run-row').forEach(row => {
     row.addEventListener('click', () => {
       openHistoryRun(row.dataset.runId, row.dataset.topic, row.dataset.status);
@@ -844,7 +856,7 @@ async function loadHistory() {
   });
 }
 function openHistoryRun(runId, topic, status) {
-  if (status === 'done') { window.open(`/api/runs/${runId}/report`, '_blank'); return; }
+  if (status === 'done') { window.open(`/api/runs/${runId}/replay`, '_blank'); return; }
   switchView('live');
   openLiveRun(runId, topic);
 }

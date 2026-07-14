@@ -193,26 +193,46 @@ class GenerateEvaluatorsTests(unittest.TestCase):
 
 
 class DraftOneIdeaTests(unittest.TestCase):
-    def test_idea_has_no_bmc_field_and_filters_invalid_insight_refs(self):
-        task = {
+    def _task(self):
+        return {
             "persona": {"id": "p1", "name": "林美", "role": "產品", "background": "b", "focus": ["f"], "style": "s"},
             "strategic_goal": "G", "target_audience": "A",
             "insights": [{"id": "i1", "text": "洞見1"}],
-            "shared_bmc": _valid_bmc("x"),
             "research_items": [],
         }
+
+    def test_idea_gets_its_own_bmc_and_filters_invalid_insight_refs(self):
+        # 使用者要求改回每位 persona 自己設計自己的 BMC（不是全場共用一份
+        # ——實測發現共用會壓低點子多樣性，見 note.md），draft_one_idea
+        # 現在跟 idea 一起、同一次呼叫產生 bmc。
         mock_response = graph.json.dumps({
             "title": "T", "summary": "S", "rationale": "R",
             "insight_refs": ["i1", "not_a_real_id"], "sources": [],
+            "bmc": _valid_bmc("自己想的"),
         })
         with mock.patch.object(graph, "call_llm", return_value=mock_response), \
              mock.patch.object(graph, "emit_event"):
-            result = graph.draft_one_idea(task)
+            result = graph.draft_one_idea(self._task())
         idea = result["ideas"][0]
-        self.assertNotIn("bmc", idea)
         self.assertEqual(idea["insight_refs"], ["i1"])
         self.assertEqual(idea["id"], "p1")
         self.assertEqual(idea["persona_name"], "林美")
+        self.assertEqual(graph.assert_bmc_complete(idea), [])
+
+    def test_missing_bmc_from_llm_still_produces_structurally_valid_default(self):
+        # LLM 沒吐出合法 bmc 時（fan-out 平行呼叫，任何一位 persona 都可能
+        # 格式不完整）不該讓整個 draft_one_idea 崩潰——_merge_bmc() 補上
+        # 安全預設值，idea 仍然帶著結構合法（即使內容是保底空值）的 bmc。
+        mock_response = graph.json.dumps({
+            "title": "T", "summary": "S", "rationale": "R",
+            "insight_refs": ["i1"], "sources": [],
+        })
+        with mock.patch.object(graph, "call_llm", return_value=mock_response), \
+             mock.patch.object(graph, "emit_event"):
+            result = graph.draft_one_idea(self._task())
+        idea = result["ideas"][0]
+        self.assertIn("bmc", idea)
+        self.assertEqual(set(idea["bmc"].keys()), set(graph.BMC_KEYS))
 
 
 class AskQuestionFlowTests(unittest.TestCase):
@@ -278,9 +298,8 @@ class BuildFinalReportMarkdownTests(unittest.TestCase):
             interviewees=[{"id": "u1", "name": "陳先生"}], used_fallback_interviewees=False,
             interview_transcript=[{"user_name": "陳先生", "round": 1, "question": "Q1", "answer": "A1"}],
             insights=[{"id": "i1", "text": "洞見1"}],
-            shared_bmc=_valid_bmc("x"),
             personas=[{"id": "p1", "name": "林美"}, {"id": "p2", "name": "陳亞"}],
-            ideas=[{"persona_name": "林美", "title": "T1", "summary": "S1", "rationale": "R1"}],
+            ideas=[{"persona_name": "林美", "title": "T1", "summary": "S1", "rationale": "R1", "bmc": _valid_bmc("y")}],
             human_qa_log=[],
             dfv_scores=[
                 {"idea_id": "p1", "lens_id": "desirability", "score": 8.0, "critique": "很想要"},
