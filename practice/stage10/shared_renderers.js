@@ -351,6 +351,52 @@ function renderExtraGeneric(action, extra) {
       // extra.prototype 是完整原型物件（含贏家 idea 自己設計的 BMC，不是
       // 共用範本），不用等回放頁——stage12 直接在即時畫面渲染。
       return renderPrototype(extra.prototype) + block('贏家自己設計的 Business Model Canvas', renderBmc((extra.prototype && extra.prototype.bmc) || {}));
+    // ---- stage13（Double Diamond 重構）專屬事件 ----
+    case 'desk_research_hypothesize_jobs':
+      // Discover 階段起點，取代 stage12 的 analyze_and_scope——這裡只
+      // 「假設」候選 job（JTBD 陳述，刻意不含解法），不像 stage12 直接
+      // 選定一個 strategic_goal；每個候選 job 各自帶一組訪談對象。
+      return block('五力分析', ul(Object.entries(extra.five_forces || {}).map(([k, v]) => `${k}：${v}`))) +
+        block('趨勢分析（科技/環境/人口結構/世代價值觀）', extra.trend_analysis ? `<p>${esc(extra.trend_analysis)}</p>` : '') +
+        block('假設的候選 job（刻意不含解法）', (extra.candidate_jobs || []).map(cj =>
+          `<div class="quote"><b>[${esc(cj.id)}] ${esc(cj.job_statement)}</b><br>${esc(cj.hypothesis_rationale || '')}<br>` +
+          `訪談對象：${(cj.interview_pool || []).map(u => esc(u.name)).join('、')}</div>`).join('')) +
+        (extra.used_fallback_candidate_jobs ? '<div class="detail-note">分析解析失敗，已退回系統保底候選 job。</div>' : '');
+    case 'research_one_candidate_job': {
+      // Discover 階段：對一個候選 job 做完整 switch 訪談＋證據萃取——
+      // 訪談逐字稿本身透過 interview_turn 事件各自顯示，這裡是訪談結束
+      // 後的證據判斷（supported 與否＋依據＋洞見），不管這個候選 job 最
+      // 後有沒有雀屏中選都看得到，方便稽核 Define 階段的決策。
+      const ev = extra.evidence || {};
+      return kv('候選 job', extra.candidate_job ? `[${extra.candidate_job.id}] ${extra.candidate_job.job_statement}` : '') +
+        kv('supported', ev.supported) +
+        block('證據依據', ev.evidence_summary ? `<p>${esc(ev.evidence_summary)}</p>` : '') +
+        block('萃取洞見', ul((ev.insights || []).map(i => i.text)));
+    }
+    case 'select_job_and_define_problem':
+      // Define 收斂：只定義問題，不定義解法——選定的 job 帶 why_selected
+      // （回溯具體證據），problem_statement/hmw 是解法無關的問題陳述。
+      return kv('選定候選 job', extra.selected_job_id) +
+        block('選定依據（why_selected）', extra.selected_job && extra.selected_job.why_selected ? `<p>${esc(extra.selected_job.why_selected)}</p>` : '') +
+        kv('Target Audience', extra.target_audience) +
+        block('Problem Statement', extra.problem_statement ? `<p>${esc(extra.problem_statement)}</p>` : '') +
+        block('How Might We', extra.hmw ? `<p>${esc(extra.hmw)}</p>` : '');
+    case 'derive_company_domains':
+      // Develop 起點的第一步：從 company.md 衍生出這家公司實際具備、
+      // 彼此明顯不同的職能，不是跟公司無關的任意領域。
+      return block('從公司能力衍生出的職能', ul(extra.domains)) +
+        (extra.used_fallback_domains ? '<div class="detail-note">解析失敗或衍生數量不足，已退回跟公司無關的保底領域池。</div>' : '');
+    case 'generate_one_persona_for_domain': {
+      // Develop 起點：derive_company_domains() 衍生出的其中一個職能，
+      // 各自獨立生成一位參與者，不是 LLM 一次判斷整支「互補團隊」。
+      const p = extra.persona || {};
+      return kv('公司衍生職能', p.domain) +
+        block(`${p.name || ''}（${p.role || ''}）`, p.background ? `<p>${esc(p.background)}</p>` : '');
+    }
+    case 'assemble_persona_team':
+      return block('扣著公司能力衍生職能組成的參與者', (extra.personas || []).map(p =>
+        `<div class="quote"><b>${esc(p.name)}</b>（職能：${esc(p.domain || '')}）<br>${esc(p.background || '')}</div>`).join('')) +
+        (extra.used_fallback_personas ? '<div class="detail-note">生成解析失敗或人數不足，已退回既有預設人設。</div>' : '');
     default:
       return '<pre>' + escapeHtml(JSON.stringify(extra, null, 2)) + '</pre>';
   }
