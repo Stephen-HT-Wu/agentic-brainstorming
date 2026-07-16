@@ -42,14 +42,36 @@ human-in-the-loop 怎麼跟 checkpointer 搭配續跑、結構化評分怎麼避
 - 一場會議先假設 3 個候選需求方向、分別訪談驗證，最後只挑一個站得住腳
   的往下走——另外兩個沒被選的方向，訪談證據仍然留在報告裡可以稽核
 
-## 現況：stage13 是目前最新的版本
+## 現況：stage15-market-fit 是目前最新的版本
 
-`practice/stageN/` 每個資料夾都是一份完整獨立副本（不互相 import），
-記錄架構演進的軌跡；`stage13` 是目前功能最完整、驗證過的版本，用
-Double Diamond（Discover→Define→Develop→Deliver）重新設計了發想流程：
-先發散假設多個候選需求方向、訪談驗證後只收斂留一個，再從那一個需求
-重新發散出多個提案、結構化評分收斂成一個最終方案。詳細設計與每一輪
-真實踩坑記錄見 [`practice/stage13/note.md`](practice/stage13/note.md)。
+`practice/stageN-xxx/` 每個資料夾都是一份完整獨立副本（不互相 import），
+記錄架構演進的軌跡。`stage13-double-diamond` 用 Double Diamond
+（Discover→Define→Develop→Deliver）重新設計了發想流程：先發散假設多個
+候選需求方向、訪談驗證後只收斂留一個，再從那一個需求重新發散出多個
+提案、結構化評分收斂成一個最終方案（詳見
+[`practice/stage13-double-diamond/note.md`](practice/stage13-double-diamond/note.md)）。
+`stage14-signals` 是前一個里程碑，在 Double Diamond 架構上擴充了幾個
+訊號來源：訪談對象生成可切換「依題目自動生成適配」與「刻意拉開差異」
+兩種視角、人數可設定；新增虛擬問卷模組（LLM 模擬不同人口特徵的虛擬
+受訪者，量化訊號輔助 Define 收斂決策，但誠實標示這只是方向性訊號，
+不是真實統計）；前台把 fan-out/fan-in 的平行分支視覺化呈現；新增公司
+背景自動調查模組（詳見
+[`practice/stage14-signals/note.md`](practice/stage14-signals/note.md)）。
+
+`stage15-market-fit` 是目前功能最完整、驗證過的版本，打破了 stage9-14
+「由下而上發現問題」的共同前提：這次策略方向由公司高層由上而下給定
+（例如「APP 建立會員付費訂閱加值功能機制」），不需要再驗證方向對不對，
+直接問「做什麼樣的具體功能會有市場競爭力？」整套 Discover/Define 拿掉，
+換成 `research_competitive_landscape`（真實 web_search 掃描競品，程式碼
+驗證每筆競品的來源網址真的來自搜尋結果，不信任 LLM 自稱）→
+persona 團隊各自發想功能提案 → `validate_market_fit`（虛擬問卷測購買
+意願/差異化、簡化版概念測試訪談、DFV 新增「市場競爭力」評審視角，
+三者依序彙整佐證）→ 收斂出最終功能。真實驗證發現：即使這次競品掃描
+落到誠實 fallback，DFV 的市場競爭力評審仍能點名具體真實競品、批評內容
+彼此不同；idea 多樣性量到 0.4304，明顯優於 stage12 歷史坍縮值但仍有
+改進空間；最終這次是 baseline 贏，是一次誠實、非人工做出來讓 agent 贏
+的真實結果。詳細設計與踩坑記錄見
+[`practice/stage15-market-fit/note.md`](practice/stage15-market-fit/note.md)。
 
 ## 怎麼看
 
@@ -66,8 +88,8 @@ open demo/sample-run/replay.html
 `ANTHROPIC_API_KEY`；`pip install -r practice/requirements.txt`）：
 
 ```
-cd practice/stage13
-python3 -m uvicorn server:app --port 8913
+cd practice/stage15-market-fit
+python3 -m uvicorn server:app --port 8915
 ```
 
 打開瀏覽器輸入主題、按「開始腦力激盪」，或用 `python3 graph.py` 走 CLI。

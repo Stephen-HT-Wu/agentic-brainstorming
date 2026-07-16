@@ -1,0 +1,35 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "stage11-live-panel",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "cd practice/stage11 && ../.venv/bin/python3 -m uvicorn server:app --host 127.0.0.1 --port 8911"],
+      "port": 8911
+    },
+    {
+      "name": "stage12-live-panel",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "cd practice/stage12 && ../.venv/bin/python3 -m uvicorn server:app --host 127.0.0.1 --port 8912"],
+      "port": 8912
+    },
+    {
+      "name": "stage13-double-diamond-live-panel",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "cd practice/stage13-double-diamond && ../.venv/bin/python3 -m uvicorn server:app --host 127.0.0.1 --port 8913"],
+      "port": 8913
+    },
+    {
+      "name": "stage14-signals-live-panel",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "cd practice/stage14-signals && ../.venv/bin/python3 -m uvicorn server:app --host 127.0.0.1 --port 8914"],
+      "port": 8914
+    },
+    {
+      "name": "stage15-market-fit-live-panel",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "cd practice/stage15-market-fit && ../.venv/bin/python3 -m uvicorn server:app --host 127.0.0.1 --port 8915"],
+      "port": 8915
+    }
+  ]
+}

@@ -331,9 +331,16 @@ function renderExtraGeneric(action, extra) {
       // 改），沒有 stage9 那種 refine/co_create 的多輪版本可看，這裡直接
       // 顯示完整 idea 內容。BMC 是這位 persona 自己設計的一份（不是共用
       // 範本，見 stage12/note.md 的多樣性發現），跟 idea 一起顯示。
+      // stage15-market-fit 額外多 target_segment/monetization_mechanism/
+      // differentiation_vs_competitors 三個欄位（沒有 insight_refs，因為
+      // 沒有 Discover/Define 收斂出的訪談洞見可以引用了）——用
+      // kv()/block() 對缺欄位安全的特性，同一個 case 兩邊都能正確顯示。
       const idea = extra.idea || {};
       return block(`《${idea.title || ''}》`, idea.summary ? `<p>${esc(idea.summary)}</p>` : '') +
         block('理由', idea.rationale ? `<p>${esc(idea.rationale)}</p>` : '') +
+        kv('目標客群', idea.target_segment) +
+        kv('貨幣化機制', idea.monetization_mechanism) +
+        block('差異化說法（對比真實競品）', idea.differentiation_vs_competitors ? `<p>${esc(idea.differentiation_vs_competitors)}</p>` : '') +
         kv('引用的訪談洞見', (idea.insight_refs || []).join('、')) +
         block('引用來源', renderResearchItems(idea.sources)) +
         block('這位參與者自己設計的 Business Model Canvas', renderBmc(idea.bmc || {}));
@@ -397,6 +404,90 @@ function renderExtraGeneric(action, extra) {
       return block('扣著公司能力衍生職能組成的參與者', (extra.personas || []).map(p =>
         `<div class="quote"><b>${esc(p.name)}</b>（職能：${esc(p.domain || '')}）<br>${esc(p.background || '')}</div>`).join('')) +
         (extra.used_fallback_personas ? '<div class="detail-note">生成解析失敗或人數不足，已退回既有預設人設。</div>' : '');
+    // ---- stage14-signals（訊號擴充）專屬事件 ----
+    case 'survey_one_stratum': {
+      // 虛擬問卷：單一人口特徵分層的模擬統計——stage14-signals 測的是
+      // 候選 job 的困擾度/強度（job_stats/high_distress_pct/avg_intensity），
+      // stage15-market-fit 改測候選功能的購買意願/差異化感受
+      // （feature_stats/purchase_intent_pct/differentiation_pct）。同一個
+      // action 名稱、不同 stage 的 extra 形狀不同，用欄位是否存在判斷
+      // 要用哪一種呈現方式，不是各自寫一份重複的 case。
+      const rows = extra.feature_stats || extra.job_stats || [];
+      const isFeature = !!extra.feature_stats;
+      return kv('人口特徵分層', extra.stratum_label) + kv('模擬樣本數', extra.n_simulated) +
+        block(
+          isFeature ? '各候選功能的模擬統計（虛擬問卷，非真人樣本）' : '各候選 job 的模擬統計（虛擬問卷，非真人樣本）',
+          rows.map(r => isFeature
+            ? `<div class="quote"><b>[${esc(r.feature_id)}] ${esc(r.feature_title || '')}</b><br>` +
+              `模擬購買意願：${esc(r.purchase_intent_pct)}%　模擬差異化感受：${esc(r.differentiation_pct)}%` +
+              (r.sample_quote ? `<br>模擬引述：${esc(r.sample_quote)}` : '') + `</div>`
+            : `<div class="quote"><b>[${esc(r.job_id)}] ${esc(r.job_statement || '')}</b><br>` +
+              `高困擾百分比：${esc(r.high_distress_pct)}%　平均強度：${esc(r.avg_intensity)}/5` +
+              (r.sample_quote ? `<br>模擬引述：${esc(r.sample_quote)}` : '') + `</div>`
+          ).join('')
+        ) +
+        (extra.used_fallback ? '<div class="detail-note">部分候選項目解析失敗，已退回中位數保底。</div>' : '');
+    }
+    case 'run_virtual_survey': {
+      // 彙整後、真正餵給 select_job_and_define_problem 的量化訊號（僅
+      // stage14-signals 使用——stage15-market-fit 的彙整結果改附在
+      // validate_market_fit 事件裡，見下面的說明）：依 n_simulated 加權
+      // 平均全部分層的統計量，一律內附方法論警語，不能被誤讀成有統計
+      // 顯著性的真實調查結果。
+      const summary = extra.survey_summary || {};
+      const byJob = summary.by_job || {};
+      return kv('總模擬樣本數', summary.total_simulated_n) +
+        block('各候選 job 彙整後的模擬統計', Object.entries(byJob).map(([jobId, stats]) =>
+          `<div class="quote"><b>[${esc(jobId)}] ${esc(stats.job_statement || '')}</b><br>` +
+          `高困擾百分比：${esc(stats.high_distress_pct)}%　平均強度：${esc(stats.avg_intensity)}/5` +
+          ((stats.sample_quotes || []).length ? `<br>模擬引述：${stats.sample_quotes.map(esc).join('；')}` : '') +
+          `</div>`).join('')) +
+        (summary.caveat ? `<div class="detail-note">⚠️ ${esc(summary.caveat)}</div>` : '');
+    }
+    // ---- stage15-market-fit（策略導向市場競爭力驗證）專屬事件 ----
+    case 'research_competitive_landscape':
+      // 取代整個 Discover/Define：真實 web_search 找競品，程式碼驗證過
+      // source_url 確實出現在搜尋結果裡（不信任 LLM 自稱），見 graph.py
+      // research_competitive_landscape() 的說明。
+      return block('真實競品掃描', (extra.competitive_landscape || []).map(c =>
+        `<div class="quote"><b>${esc(c.competitor_name)}</b>：${esc(c.feature_description)}` +
+        (c.source_url ? `<br>來源：${esc(c.source_url)}` : '') + `</div>`).join('')) +
+        (extra.used_fallback_competitive_landscape ? '<div class="detail-note">本次未能取得具體競品資訊，以下評分僅供參考。</div>' : '');
+    case 'concept_test_turn': {
+      // 簡化版概念測試訪談（1-2 輪固定問題，不是 5 輪 JTBD switch）：
+      // 看第一反應＋會不會付費/切換，附加一次輕量分類（CHEAP_MODEL）
+      // 判斷 would_pay，模擬訊號，不是真實統計。訪談對象是同一組固定
+      // 小組，不像 stage14-signals 那樣有全域訪談對象清單可以事後查表
+      // （findUser()），這裡完整內嵌在 extra.interviewee 裡，直接渲染，
+      // 不查表。
+      const transcript = extra.transcript || [];
+      return block('被訪談者的人物設定', renderUserProfile(extra.interviewee)) +
+        kv('候選功能', extra.feature_title) + kv('會不會付費/切換', extra.would_pay ? '會' : '不會') +
+        block('訪談逐字稿', transcript.map(t => `<div class="quote"><b>Q：</b>${esc(t.question)}<br><b>A：</b>${esc(t.answer)}</div>`).join('')) +
+        kv('反應摘要', extra.reaction_summary);
+    }
+    case 'validate_market_fit': {
+      // 收斂前的快速市場驗證彙整：依序呼叫虛擬問卷／概念測試訪談／DFV
+      // 四面向評分（見 graph.py validate_market_fit() 的說明），這裡把
+      // 前兩者的彙整結果並陳——DFV 評分本身透過各自的 dfv_score 事件
+      // 顯示，不重複列在這裡。
+      const survey = extra.survey_summary || {};
+      const conceptTest = extra.concept_test_summary || {};
+      const surveyByFeature = survey.by_feature || {};
+      const conceptByFeature = conceptTest.by_feature || {};
+      return kv('虛擬問卷總模擬樣本數', survey.total_simulated_n) +
+        block('虛擬問卷：各候選功能的購買意願/差異化感受', Object.entries(surveyByFeature).map(([fid, s]) =>
+          `<div class="quote"><b>[${esc(fid)}] ${esc(s.feature_title || '')}</b><br>` +
+          `模擬購買意願：${esc(s.purchase_intent_pct)}%　模擬差異化感受：${esc(s.differentiation_pct)}%` +
+          ((s.sample_quotes || []).length ? `<br>模擬引述：${s.sample_quotes.map(esc).join('；')}` : '') +
+          `</div>`).join('')) +
+        block('概念測試訪談：各候選功能的付費/切換意願', Object.entries(conceptByFeature).map(([fid, s]) =>
+          `<div class="quote"><b>[${esc(fid)}] ${esc(s.feature_title || '')}</b><br>` +
+          `${esc(s.n_interviewed)} 位模擬訪談中 ${esc(s.would_pay_pct)}% 表示願意付費/切換` +
+          ((s.sample_reactions || []).length ? `<br>代表反應：${s.sample_reactions.map(esc).join('；')}` : '') +
+          `</div>`).join('')) +
+        (survey.caveat ? `<div class="detail-note">⚠️ ${esc(survey.caveat)}</div>` : '');
+    }
     default:
       return '<pre>' + escapeHtml(JSON.stringify(extra, null, 2)) + '</pre>';
   }
