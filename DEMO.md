@@ -120,12 +120,12 @@
 ## 給懂技術的人：怎麼重新產生這份樣本
 
 `demo/sample-run/` 是用範例設定（`personas.example.yaml`／
-`users.example.yaml`／`company.example.md`，全部虛構）跑 stage13
-真實產生的，不會動到你自己的真實設定檔（程式在這些檔案不存在時本來
-就會 fallback 到 `*.example.*`）：
+`users.example.yaml`／`company.example.md`，全部虛構）跑
+stage13-double-diamond 真實產生的，不會動到你自己的真實設定檔（程式在
+這些檔案不存在時本來就會 fallback 到 `*.example.*`）：
 
 ```bash
-cd practice/stage13
+cd practice/stage13-double-diamond
 mkdir -p /tmp/demo_run
 ../.venv/bin/python3 run_worker.py start --run-dir /tmp/demo_run \
   --thread demo-sample --topic "你想測試的主題" --example-config

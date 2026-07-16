@@ -10,6 +10,9 @@ __pycache__/
 personas.yaml
 users.yaml
 company.md
+# stage14-signals 公司自動調查產出（{slug}-company.md）——跟 company.md
+# 同一種隱私考量，副檔名不會誤擋 company.example.md（那是 .example.md）
+*-company.md
 
 # 記憶與 checkpointer（含會議內容）
 chroma_db/
